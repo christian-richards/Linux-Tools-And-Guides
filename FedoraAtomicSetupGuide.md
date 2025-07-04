@@ -172,84 +172,83 @@ Log out and log in as your user (`christian`).
 
 ### Shared Hotspot And VM Network Setup
 
-*   `**Add the bridge connection profile**`
-    `_sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes_`
+#### Add the bridge connection profile
+    sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes
     
-    `**Configure the bridge IP address**`
-    `_sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168._``_42_``_.1/24_` `_#_``No gateway needed on the bridge itself`
+#### Configure the bridge IP address
+    sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.42.1/24 #No gateway needed on the bridge itself
     
-    `**Disable Spanning Tree Protocol (usually not needed for a simple setup)**`
-    `_sudo nmcli con modify br-hotspot bridge.stp no_`
+#### Disable Spanning Tree Protocol (usually not needed for a simple setup)
+    sudo nmcli con modify br-hotspot bridge.stp no
     
-    `**Bring the connection up (might already be up due to autoconnect)**`
-    `_sudo nmcli con up br-hotspot_`
+#### Bring the connection up (might already be up due to autoconnect)
+    sudo nmcli con up br-hotspot
     
-    `**Configure firewalld to allow DHCP and DNS traffic coming**` `_**in**_` `**on the br-hotspot interface, destined for the dnsmasq server running locally**`
+#### Configure firewalld to allow DHCP and DNS traffic coming in on the br-hotspot interface, destined for the dnsmasq server running locally
     `#0. Create hotspot zone`
-    `_sudo firewall-cmd --permanent --new-zone=_``_internal_`
-    `# 1. Assign bridge interface to the '``internal``' zone (if not already done)` 
-    `_sudo firewall-cmd --permanent --zone=_``_internal_` `_--add-interface=br-hotspot_` 
+    sudo firewall-cmd --permanent --new-zone=internal
+    `# 1. Assign bridge interface to the internal zone (if not already done)` 
+    sudo firewall-cmd --permanent --zone=internal --add-interface=br-hotspot
     `# 2. Allow DHCP service in the 'internal' zone` 
-    `_sudo firewall-cmd --permanent --zone=_``_internal_` `_--add-service=dhcp_` 
+    sudo firewall-cmd --permanent --zone=internal --add-service=dhcp 
     `# 3. Allow DNS service in the 'internal' zone` 
-    `_sudo firewall-cmd --permanent --zone=_``_internal_` `_--add-service=dns_` 
+    sudo firewall-cmd --permanent --zone=internal --add-service=dns 
     `# 4. Reload firewalld to apply changes` 
-    `_sudo firewall-cmd --reload_` 
+    sudo firewall-cmd --reload 
     `# 5. Verify (optional)` 
-    `_sudo firewall-cmd --zone=hotspot --list-all_`
+    sudo firewall-cmd --zone=hotspot --list-all
     
 
-	`**Enable**` `**Internet Access On Bridge And Hotspot**`
+#### Enable Internet Access On Bridge And Hotspot
 	
 	`**Enable Kernel IP Forwarding (Permanent):**`
 	`**# Create or modify a sysctl configuration file for persistence**` 
-	`_echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-forwarding.conf_` 
+	echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-forwarding.conf
 	`**# Apply the setting immediately without rebooting**` 
-	`_sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward_`	
+	sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward	
 
 	`**Assign Interfaces and Sources to**` `**firewalld**` `**Zones:**`
 	`**# Assign the internet interface to the 'external' zone**`
-	`_sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0_` 
-	`**# Assign the hotspot bridge interface to the '**``**internal**``**' zone**` 
-	`_sudo firewall-cmd --permanent --zone=_``_internal_` `_--change-interface=br-hotspot_` 
-	`**# (Optional**``**)**` `**Explicitly assign the source subnet to '**``**internal**``**' zone**` 
-	`_sudo firewall-cmd --permanent --zone=_``_internal_` `_–add-source=192.168.42.0/24_`
+	sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0
+	`**# Assign the hotspot bridge interface to the internal zone**` 
+	sudo firewall-cmd --permanent --zone=internal --change-interface=br-hotspot 
+	`**# (Optional: Explicitly assign the source subnet to internal zone**` 
+	sudo firewall-cmd --permanent --zone=internal -–add-source=192.168.42.0/24
 
-	`**Set External Zone**` `**as**` `**Default Zone**` `**and enable services available to previous default**``**:**`
-	`_sudo firewall-cmd –set-default-zone=external_`
-	`_sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent_`
+	`**Set External Zone as Default Zone and enable services available to previous default**`
+	sudo firewall-cmd –set-default-zone=external
+	sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent
 	`**Enable Masquerading (NAT) on the External Zone:**`
-	`_sudo firewall-cmd --permanent --zone=external --add-masquerade_` 
+	sudo firewall-cmd --permanent --zone=external --add-masquerade 
 
-	`**Create Policy to Allow Forwarding from**` `**internal**` `**to**` `**external**`
+	`**Create Policy to Allow Forwarding from internal to external**`
 	`**# Create the policy object**` 
-	`_sudo firewall-cmd --permanent --new-policy P__``_Internal2_``_External_` 
+	sudo firewall-cmd --permanent --new-policy PInt2Ext 
 	`**# Define traffic source zone (ingress)**` 
-	`_sudo firewall-cmd --permanent --policy P__``_Internal2_``_External --add-ingress-zone=_``_internal_` 
+	sudo firewall-cmd --permanent --policy PInt2Ext --add-ingress-zone=internal 
 	`**# Define traffic destination zone (egress)**` 
-	`_sudo firewall-cmd --permanent --policy P__``_Internal2_``_External --add-egress-zone=external_` 
+	sudo firewall-cmd --permanent --policy PInt2Ext --add-egress-zone=external 
 	`**# Set the policy action to allow the traffic**` 
-	`_sudo firewall-cmd --permanent --policy P__``_Internal2_``_External --set-target ACCEPT_`
+	sudo firewall-cmd --permanent --policy PInt2Ext --set-target ACCEPT
 	
 	`**Apply All firewalld Changes**`
-	`_sudo firewall-cmd --reload_`
+	sudo firewall-cmd --reload
 
 	`**Copy the hotspot script to a directory in the path to be used in the terminal**`
-	`_cd /var/mnt/DATAONE/Tools/Hotspot_`
-	`_sudo ./updatehotspot_`
+	cd /var/mnt/DATAONE/Tools/Hotspot
+	sudo ./updatehotspot
 
 1.  **Create a libvirt network** **using the following XML**:
     
     XML
     
-    `<network>`
-      `_<name>hotspot-bridged-net</name>_` 
-    `_<forward mode='bridge'/>_`      
-    `_<bridge name='br-hotspot'/>_`    
-    `_</network>_`
+    <network>
+      <name>hotspot-bridged-net</name> 
+      <forward mode='bridge'/>
+      <bridge name='br-hotspot'/>
+    </network>
     
-
-	`**Add the network to your VM**` 
+`**Add the network to your VM**` 
 
 `Under "Network source", choose "Virtual network 'hotspot-bridged-net': Bridge``d Network``"`
 
@@ -734,8 +733,4 @@ Now, tell libvirt about the existing host bridge (`br-hotspot`) so VMs can conne
         
 
 This setup creates a bridged network (`br-hotspot`) where your VM and your hotspot clients reside on the same logical network segment (192.168.42.0/24). The host routes traffic between this network and the internet using its primary Wi-Fi connection (`wlan0`) via NAT. This directly fulfills the requirement for clients to access any service on the VM without manual port forwarding.
-
-  
-  
-
 * * *
