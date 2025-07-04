@@ -242,11 +242,11 @@ Log out and log in as your user (`christian`).
     
     XML
     
-    <network>
+    `**<network>
       <name>hotspot-bridged-net</name> 
       <forward mode='bridge'/>
       <bridge name='br-hotspot'/>
-    </network>
+    </network>**` 
     
 `**Add the network to your VM**` 
 
