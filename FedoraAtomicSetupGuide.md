@@ -297,29 +297,29 @@ ip a
 2.  Add the following configuration to the file:
     
 ```xml
-`[global]`
-    `workgroup = SAMBA`
-    `security = user`
-    `passdb backend = tdbsam`
-    `bind interfaces only = yes`
-    `interfaces = virbr0,br-hotspot`
-    `force user = christian`
+[global]
+    workgroup = SAMBA
+    security = user
+    passdb backend = tdbsam
+    bind interfaces only = yes
+    interfaces = virbr0,br-hotspot
+    force user = christian
 
-`[Shared]`
-    `path = /var/mnt/DATAONE/Shared`
-    `browseable = no`
-    `read only = no`
-    `create mask = 0755` 
-    `directory mask = 0775`
-    `valid users = christian`
+[Shared]
+    path = /var/mnt/DATAONE/Shared
+    browseable = no
+    read only = no
+    create mask = 0755
+    directory mask = 0775
+    valid users = christian
 
-`[Creative]`
-    `path = /var/mnt/DATAONE/Creative`
-    `browseable = no`
-    `read only = no`
-    `create mask = 0755` 
-    `directory mask = 0775`
-    `valid users = christian`
+[Creative]
+    path = /var/mnt/DATAONE/Creative
+    browseable = no
+    read only = no
+    create mask = 0755
+    directory mask = 0775
+    valid users = christian
 ```
 
 ### 3\. **Enable SELinux for Shared Folders**
