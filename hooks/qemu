@@ -1,0 +1,87 @@
+#!/bin/bash
+
+GUEST="$1"
+HOOK="$2"
+STATE="$3"
+
+#Define devices using YOUR actual PCI addresses
+GPU_XML=$(cat <<EOF
+<hostdev mode='subsystem' type='pci' managed='yes'>
+  <source>
+    <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+  </source>
+</hostdev>
+EOF
+)
+
+AUDIO_XML=$(cat <<EOF
+<hostdev mode='subsystem' type='pci' managed='yes'>
+  <source>
+    <address domain='0x0000' bus='0x01' slot='0x00' function='0x1'/>
+  </source>
+</hostdev>
+EOF
+)
+
+
+# Run if guest name does not start with 'e'
+if [[ "${GUEST}" != "e"* ]]; then
+    if [[ "${HOOK}" == "prepare" && "${STATE}" == "begin" ]]; then
+        ## Set CPU governor to performance mode
+        CPU_COUNT=0
+        for file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo performance > "$file"
+            echo "CPU $CPU_COUNT governor: performance"
+            ((CPU_COUNT++))
+        done
+
+        ## Set system power profile to performance (uncomment if needed)
+        powerprofilesctl set performance
+
+        systemctl start smb.service
+
+        ## Isolate CPUs
+        systemctl set-property --runtime -- user.slice AllowedCPUs=0-1,8-9
+        systemctl set-property --runtime -- system.slice AllowedCPUs=0-1,8-9
+        systemctl set-property --runtime -- init.scope AllowedCPUs=0-1,8-9
+    fi
+
+    if [[ "${HOOK}" == "started" && "${STATE}" == "begin" ]]; then
+        echo "Started"
+        # Daemonize the sleep and commands to avoid blocking libvirt
+        (
+            exec >/dev/null 2>&1
+	    sleep 20
+	    echo "VM is likely booted. Running tasks..." > /tmp/vm_hook.log
+	    # Attach devices using root context
+            echo "$GPU_XML" | /usr/bin/virsh -c qemu:///system attach-device "$GUEST" /dev/stdin --live
+            sleep 2
+            echo "$AUDIO_XML" | /usr/bin/virsh -c qemu:///system attach-device "$GUEST" /dev/stdin --live
+	) &
+	disown $!
+    fi
+    
+    if [[ "${HOOK}" == "stopped" && "${STATE}" == "end" ]]; then
+        echo "Stopped"
+    fi
+
+    if [[ "${HOOK}" == "release" && "${STATE}" == "end" ]]; then
+        ## Reset CPU governor to powersave
+        CPU_COUNT=0
+        for file in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo powersave > "$file"
+            echo "CPU $CPU_COUNT governor: powersave"
+            ((CPU_COUNT++))
+        done
+
+        ## Reset system power profile (uncomment if needed)
+        powerprofilesctl set power-saver
+
+	systemctl stop smb.service
+
+        ## Unisolate CPUs
+        systemctl set-property --runtime -- user.slice AllowedCPUs=0-15
+        systemctl set-property --runtime -- system.slice AllowedCPUs=0-15
+        systemctl set-property --runtime -- init.scope AllowedCPUs=0-15
+    fi
+fi

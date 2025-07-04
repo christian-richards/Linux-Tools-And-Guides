@@ -1,0 +1,607 @@
+#!/bin/bash
+
+# --- Configuration (Defaults/Constants) ---
+# SSID and PASSWORD are now arguments for the 'start' command
+CHANNEL=157 # Ensure this is a valid 5GHz channel for your region/card (check 'iw list')
+FALLBACK_IFACE="wlp102s0f3u2" # Interface name to use if auto-detection fails
+USB_ID="13b1:0045"
+
+# Network configuration (MUST match your manual setup)
+BRIDGE_NAME="br-hotspot"
+BRIDGE_IP="192.168.42.1" # Host's IP on the bridge (Gateway for clients)
+SUBNET_CIDR="192.168.42.0/24" # Subnet for clients/VM
+
+# --- Variables set by arguments ---
+# These will be populated when 'start SSID PASSWORD' is used
+SSID=""
+PASSWORD=""
+
+# --- Constants ---
+SCRIPT_NAME=$(basename "$0")
+RUN_DIR="/run/hotspot_manager"
+HOSTAPD_CONF_FILE="${RUN_DIR}/hostapd.conf"
+DNSMASQ_CONF_FILE="${RUN_DIR}/dnsmasq.conf"
+HOSTAPD_PID_FILE="${RUN_DIR}/hostapd.pid"
+DNSMASQ_PID_FILE="${RUN_DIR}/dnsmasq.pid"
+
+# This variable will be populated by detect_wifi_interface()
+WIFI_INTERFACE=""
+
+# --- Helper Functions ---
+log_info() {
+    echo "[INFO] $@"
+}
+
+log_warning() {
+    echo "[WARN] $@" >&2
+}
+
+log_error() {
+    echo "[ERROR] $@" >&2
+}
+
+# Check if user is root or can use sudo without password prompt ideally
+check_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        log_warning "This script needs to run commands with sudo."
+        sudo -v # Prompt for password early if needed
+        if [[ $? -ne 0 ]]; then
+            log_error "Failed to get sudo privileges. Exiting."
+            exit 1
+        fi
+         SUDO="sudo"
+    else
+        SUDO="" # Already root
+    fi
+}
+
+# Check if a command exists
+check_command() {
+    command -v "$1" >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+        log_error "Required command '$1' not found. Please install it."
+        return 1
+    fi
+    return 0
+}
+
+# Detect the Wi-Fi interface based on USB ID
+# Detect the Wi-Fi interface based on USB ID, trying multiple methods
+detect_wifi_interface() {
+    log_info "Attempting to detect Wi-Fi interface for USB ID ${USB_ID}..."
+    local target_vendor_id target_product_id
+    target_vendor_id=$(echo "$USB_ID" | cut -d':' -f1 | tr '[:upper:]' '[:lower:]')
+    target_product_id=$(echo "$USB_ID" | cut -d':' -f2 | tr '[:upper:]' '[:lower:]')
+
+    local iface devpath method1_found=0 method2_found=0
+
+    # Iterate through all network interfaces
+    for iface_path in /sys/class/net/*; do
+        iface=$(basename "$iface_path")
+        # Skip non-wireless or non-existent devices/symlinks
+        [[ ! -d "$iface_path/wireless" ]] && continue
+        [[ ! -e "$iface_path/device" ]] && continue
+
+        devpath=$(readlink -f "$iface_path/device")
+
+        # Check if it's likely a USB device path
+        if echo "$devpath" | grep -q '/usb[0-9]\+'; then
+
+            # --- Method 1: Check uevent file (Based on your debugging info) ---
+            local uevent_file="${devpath}/uevent"
+            if [[ -r "$uevent_file" ]]; then
+                local product_line product_info vendor_part product_part formatted_product_part
+                # Look for PRODUCT=VVVV/PPPP/... format
+                product_line=$(grep '^PRODUCT=' "$uevent_file" 2>/dev/null)
+                if [[ -n "$product_line" ]]; then
+                     # Extract VVVV/PPPP part using grep/awk or parameter expansion
+                     # Example using awk: vendor_part=$(echo "$product_line" | awk -F'[/=]' '{print $2}')
+                     # Example using parameter expansion (less robust if format varies slightly):
+                     product_info=${product_line#PRODUCT=} # Remove PRODUCT=
+                     vendor_part=${product_info%%/*}       # Get part before first /
+                     product_part=$(echo "$product_info" | cut -d'/' -f2) # Get part after first /
+
+                    if [[ -n "$vendor_part" && -n "$product_part" ]]; then
+                        # Normalize to lowercase and format product ID to 4 digits with leading zeros
+                        vendor_part=$(echo "$vendor_part" | tr '[:upper:]' '[:lower:]')
+                        # Use printf to ensure 4 hex digits for product ID comparison
+                        formatted_product_part=$(printf "%04x" "0x${product_part}" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+                        if [[ "$vendor_part" == "$target_vendor_id" && "$formatted_product_part" == "$target_product_id" ]]; then
+                            WIFI_INTERFACE="$iface"
+                            log_info "Detected USB Wi-Fi interface (${USB_ID}) using Method 1 (uevent): ${WIFI_INTERFACE}"
+                            method1_found=1
+                            break # Exit the loop once found
+                        fi
+                    fi
+                fi
+            fi # End Method 1 check
+
+            # --- Method 2: Check idVendor/idProduct files (Original method) ---
+            # Only try if Method 1 didn't find it for this interface yet
+            if [[ $method1_found -eq 0 ]]; then
+                local sysfs_vendor_file="${devpath}/idVendor"
+                local sysfs_product_file="${devpath}/idProduct"
+                if [[ -r "$sysfs_vendor_file" && -r "$sysfs_product_file" ]]; then
+                    local sysfs_vendor sysfs_product
+                    sysfs_vendor=$(cat "$sysfs_vendor_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+                    sysfs_product=$(cat "$sysfs_product_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+
+                     # Ensure product ID read from file is 4 digits for comparison consistency (though usually they are)
+                     # sysfs_product=$(printf "%04s" "$sysfs_product") # Pad with spaces - not hex zero padding
+                     # Better just compare directly assuming file content is correct format
+                     
+                    if [[ "$sysfs_vendor" == "$target_vendor_id" && "$sysfs_product" == "$target_product_id" ]]; then
+                         WIFI_INTERFACE="$iface"
+                         log_info "Detected USB Wi-Fi interface (${USB_ID}) using Method 2 (idVendor/idProduct files): ${WIFI_INTERFACE}"
+                         method2_found=1
+                         break # Exit the loop once found
+                    fi
+                fi
+            fi # End Method 2 check
+
+        fi # End USB path check
+    done # End loop through interfaces
+
+    # --- Method 3: Use Fallback Variable ---
+    if [[ $method1_found -eq 0 && $method2_found -eq 0 ]]; then
+        log_warning "Could not automatically detect interface for USB ID ${USB_ID} using Methods 1 or 2."
+        if [[ -n "$FALLBACK_IFACE" && -d "/sys/class/net/$FALLBACK_IFACE" ]]; then
+            log_info "Using fallback interface: ${FALLBACK_IFACE}"
+            WIFI_INTERFACE="$FALLBACK_IFACE"
+            return 0
+        else
+            log_error "Fallback interface '${FALLBACK_IFACE}' is invalid, not set, or does not exist."
+            WIFI_INTERFACE="" # Ensure it's empty on failure
+            return 1
+        fi
+    fi
+
+    # If we reached here, Method 1 or 2 succeeded in the loop
+     if [[ -z "$WIFI_INTERFACE" ]]; then
+         # This case should ideally not be reached if break worked, but as safety check
+         log_error "Detection logic error: Interface found but variable not set."
+         return 1
+     fi
+    return 0
+}
+
+# Check prerequisites before starting
+check_prerequisites() {
+    log_info "Checking prerequisites..."
+    local required_commands=("hostapd" "dnsmasq" "ip" "sysctl" "iptables" "nmcli" "iw") # Added iw, nmcli
+    local prereq_ok=1 # Assume OK
+
+    for cmd in "${required_commands[@]}"; do
+        if ! check_command "$cmd"; then
+            prereq_ok=0
+        fi
+    done
+
+    # Check bridge existence
+    if ! ip link show "$BRIDGE_NAME" > /dev/null 2>&1; then
+        log_error "Bridge interface '$BRIDGE_NAME' does not exist."
+        log_error "Please create it manually (e.g., using 'sudo nmcli con add type bridge ifname $BRIDGE_NAME con-name $BRIDGE_NAME autoconnect yes -- bridge.stp no')."
+        prereq_ok=0
+    else
+         # Check bridge state (should be UP)
+        if ! ip link show "$BRIDGE_NAME" | grep -q "state UP"; then
+            log_warning "Bridge interface '$BRIDGE_NAME' exists but is DOWN."
+            log_warning "Bring it up manually (e.g., 'sudo nmcli con up $BRIDGE_NAME')."
+             # Allow proceeding but warn
+        fi
+        # Check bridge IP address
+        if ! ip addr show "$BRIDGE_NAME" | grep -q "inet ${BRIDGE_IP}/"; then
+            log_error "Bridge interface '$BRIDGE_NAME' does not have the expected IP address (${BRIDGE_IP})."
+            log_error "Please assign it manually (e.g., 'sudo nmcli con modify $BRIDGE_NAME ipv4.method manual ipv4.addresses ${BRIDGE_IP}/24')."
+            prereq_ok=0
+        fi
+    fi
+
+    # Check IP forwarding
+    if ! sysctl net.ipv4.ip_forward | grep -q "= 1"; then
+        log_error "IP forwarding (net.ipv4.ip_forward) is not enabled."
+        log_error "Enable it manually (e.g., 'sudo sysctl -w net.ipv4.ip_forward=1' and make it persistent)."
+        prereq_ok=0
+    fi
+
+     # Warn about NAT rule (checking requires sudo and might be complex)
+    log_warning "Please ensure the necessary firewalld or iptables NAT rule is in place:"
+    log_warning "Example: 'sudo iptables -t nat -A POSTROUTING -s ${SUBNET_CIDR} -o <your_internet_iface> -j MASQUERADE'"
+    log_warning "(Checking this automatically is complex; verify it manually.)."
+    log_warning "CHECK THE SETUP DOCUMENTATION FOR THE STEP BY STEP FIREWALLD CONFIGURATION ENSURE EXTERNAL IS THE DEFAULT ZONE FOR FIREWALLD"
+
+    # Check if target interface exists and supports AP mode
+    if [[ -n "$WIFI_INTERFACE" ]]; then
+        if ! iw dev "$WIFI_INTERFACE" info > /dev/null 2>&1; then
+             log_error "Detected/Fallback interface '$WIFI_INTERFACE' does not seem to be a valid wireless device."
+             prereq_ok=0
+        fi
+    fi
+
+    # Warn if NetworkManager might be managing the interface
+     if [[ -n "$WIFI_INTERFACE" ]]; then
+        if check_command "nmcli" && nmcli -t -f DEVICE,STATE dev | grep -q "^${WIFI_INTERFACE}:connected"; then
+            log_warning "NetworkManager reports that '$WIFI_INTERFACE' is connected."
+            log_warning "This might interfere with hostapd. Consider disconnecting or setting it to unmanaged in NetworkManager."
+            # Allow proceeding but warn strongly
+        fi
+     fi
+
+     # Warn about libvirt network
+     log_warning "Please ensure your libvirt network ('hotspot-bridged-net' or similar) is configured to use the '$BRIDGE_NAME' bridge."
+
+    if [[ $prereq_ok -eq 0 ]]; then
+        log_error "Prerequisite checks failed. Please address the issues above before starting the hotspot."
+        return 1
+    fi
+
+    log_info "Prerequisites look OK."
+    return 0
+}
+
+# Generate hostapd.conf
+generate_hostapd_conf() {
+    log_info "Generating ${HOSTAPD_CONF_FILE}..."
+    cat << EOF > "$HOSTAPD_CONF_FILE"
+# Autogenerated by ${SCRIPT_NAME} on $(date)
+interface=${WIFI_INTERFACE}
+bridge=${BRIDGE_NAME}
+driver=nl80211
+country_code=US
+
+# AP Settings
+ssid=${SSID}
+hw_mode=a
+channel=${CHANNEL}
+ieee80211n=1
+ieee80211ac=1
+wmm_enabled=1
+
+# Security (WPA2-PSK)
+macaddr_acl=0
+auth_algs=1
+ignore_broadcast_ssid=0
+wpa=2
+wpa_passphrase=${PASSWORD}
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+# wpa_pairwise=CCMP TKIP # Avoid TKIP if possible
+
+EOF
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to write ${HOSTAPD_CONF_FILE}"
+        return 1
+    fi
+    log_info "Generated ${HOSTAPD_CONF_FILE}"
+    return 0
+}
+
+# Generate dnsmasq.conf
+generate_dnsmasq_conf() {
+    log_info "Generating ${DNSMASQ_CONF_FILE}..."
+    # Simple subnet parsing - assumes /24
+    local network_prefix=$(echo "$BRIDGE_IP" | cut -d. -f1-3)
+    local dhcp_start="${network_prefix}.100"
+    local dhcp_end="${network_prefix}.200"
+    local subnet_mask="255.255.255.0"
+
+    cat << EOF > "$DNSMASQ_CONF_FILE"
+# Autogenerated by ${SCRIPT_NAME} on $(date)
+# Listen only on the bridge interface for DHCP/DNS requests
+interface=${BRIDGE_NAME}
+bind-interfaces # Important!
+
+# DHCP Range
+# Format: start_ip, end_ip, subnet_mask, lease_time
+dhcp-range=${dhcp_start},${dhcp_end},${subnet_mask},12h
+
+# Gateway IP (Router option)
+dhcp-option=option:router,${BRIDGE_IP}
+
+# DNS Server(s) - Use the bridge IP (dnsmasq itself) for caching/forwarding
+dhcp-option=option:dns-server,${BRIDGE_IP}
+# Example: Use external DNS directly
+# dhcp-option=option:dns-server,8.8.8.8,1.1.1.1
+
+# Optional: Log queries for debugging
+# log-queries
+# log-dhcp
+
+EOF
+    if [[ $? -ne 0 ]]; then
+        log_error "Failed to write ${DNSMASQ_CONF_FILE}"
+        return 1
+    fi
+     log_info "Generated ${DNSMASQ_CONF_FILE}"
+    return 0
+}
+
+# Start the hotspot services
+start_hotspot() {
+    log_info "Starting hotspot..."
+    check_sudo # Ensure we can use sudo
+
+    # Check if already running
+    if [[ -f "$HOSTAPD_PID_FILE" ]] && ps -p "$(cat "$HOSTAPD_PID_FILE")" > /dev/null; then
+        log_warning "Hostapd seems to be running already (PID: $(cat "$HOSTAPD_PID_FILE"))."
+        # Optionally try to stop first or just exit
+        # return 1
+    fi
+     if [[ -f "$DNSMASQ_PID_FILE" ]] && ps -p "$(cat "$DNSMASQ_PID_FILE")" > /dev/null; then
+        log_warning "Dnsmasq seems to be running already (PID: $(cat "$DNSMASQ_PID_FILE"))."
+        # return 1
+    fi
+
+    # Create run directory if it doesn't exist
+    if ! mkdir -p "$RUN_DIR"; then
+        log_error "Failed to create run directory: ${RUN_DIR}"
+        return 1
+    fi
+    # Potentially set permissions if not running as root, though services need root anyway
+    # chmod 700 "$RUN_DIR"
+
+    # Detect interface first
+    if ! detect_wifi_interface; then
+         exit 1 # Error message already printed by function
+    fi
+
+    # Run prerequisite checks *after* detecting interface
+    if ! check_prerequisites; then
+        exit 1 # Error message already printed by function
+    fi
+    
+    # Prevent NetworkManager from managing the USB Wifi Interface
+    log_info "Attempting to set interface '${WIFI_INTERFACE}' to unmanaged in NetworkManager (temporary)..."
+    # Execute the nmcli command using the SUDO variable
+    if $SUDO nmcli dev set "$WIFI_INTERFACE" managed no > /dev/null 2>&1; then
+	log_info "Successfully set '${WIFI_INTERFACE}' to unmanaged via nmcli for this session."
+    else
+	# The nmcli command returned an error
+	log_warning "Failed to set '${WIFI_INTERFACE}' to unmanaged via nmcli (exit code: $?)."
+	log_warning "NetworkManager might still interfere. Check nmcli output manually if needed."
+	log_warning "Consider using a permanent NetworkManager configuration file if problems persist."
+    fi
+
+    # Generate config files
+    if ! generate_hostapd_conf || ! generate_dnsmasq_conf; then
+        log_error "Failed to generate config files. Aborting start."
+        # Clean up partially generated files?
+        rm -f "$HOSTAPD_CONF_FILE" "$DNSMASQ_CONF_FILE"
+        return 1
+    fi
+
+    # Bring the interface up (best effort, might already be up)
+    log_info "Ensuring interface ${WIFI_INTERFACE} is up..."
+    if ! $SUDO ip link set "$WIFI_INTERFACE" up; then
+        log_warning "Failed to bring up interface ${WIFI_INTERFACE}. It might already be up or there's another issue."
+        # Continue anyway, hostapd might handle it or fail later
+    fi
+
+    # Start dnsmasq first
+    log_info "Starting dnsmasq..."
+    # Run explicitly as root, dnsmasq usually drops privileges later if configured
+    # Note: If systemd-resolved is running, dnsmasq might fail on port 53.
+    # You might need 'sudo systemctl stop systemd-resolved' before starting.
+    if ! $SUDO dnsmasq --conf-file="$DNSMASQ_CONF_FILE" --pid-file="$DNSMASQ_PID_FILE" --user=root --group=root; then
+        log_error "Failed to start dnsmasq. Check logs (e.g., /var/log/syslog or journalctl) and ensure port 53 is free."
+        rm -f "$HOSTAPD_CONF_FILE" "$DNSMASQ_CONF_FILE" # Clean up configs on failure
+        return 1
+    fi
+     sleep 1 # Give dnsmasq a moment
+
+    # Start hostapd
+    log_info "Starting hostapd..."
+    if ! $SUDO hostapd -B -P "$HOSTAPD_PID_FILE" "$HOSTAPD_CONF_FILE"; then
+        log_error "Failed to start hostapd. Check logs and ensure the interface is not in use."
+        # Stop dnsmasq if hostapd failed
+        if [[ -f "$DNSMASQ_PID_FILE" ]]; then
+             log_info "Stopping dnsmasq due to hostapd failure..."
+            $SUDO kill "$(cat "$DNSMASQ_PID_FILE")"
+            rm -f "$DNSMASQ_PID_FILE"
+        fi
+        rm -f "$HOSTAPD_CONF_FILE" "$DNSMASQ_CONF_FILE" # Clean up configs
+        return 1
+    fi
+
+    sleep 1 # Give hostapd a moment
+
+    # Final check
+    if [[ -f "$HOSTAPD_PID_FILE" ]] && ps -p "$(cat "$HOSTAPD_PID_FILE")" > /dev/null && \
+       [[ -f "$DNSMASQ_PID_FILE" ]] && ps -p "$(cat "$DNSMASQ_PID_FILE")" > /dev/null; then
+        log_info "Hotspot started successfully!"
+        log_info "SSID: ${SSID}"
+        log_info "Password: ${PASSWORD}"
+        log_info "Interface: ${WIFI_INTERFACE}"
+        log_info "Bridge: ${BRIDGE_NAME} (${BRIDGE_IP})"
+    else
+        log_error "Hotspot failed to start completely. Check PID files and logs."
+        # Attempt cleanup
+        stop_hotspot
+        return 1
+    fi
+
+    return 0
+}
+
+# Stop the hotspot services
+stop_hotspot() {
+    log_info "Stopping hotspot..."
+    check_sudo # Ensure we can use sudo
+
+    local hostapd_stopped=0 dnsmasq_stopped=0
+    
+    # Attempt to detect the interface again *if* WIFI_INTERFACE isn't set
+    # This might happen if 'stop' is called without 'start' having run successfully in the same script invocation
+    if [[ -z "$WIFI_INTERFACE" ]]; then
+        log_info "WIFI_INTERFACE variable not set, attempting detection to re-enable management..."
+        detect_wifi_interface # Don't exit on failure here, just try
+    fi
+
+    # Stop hostapd
+    if [[ -f "$HOSTAPD_PID_FILE" ]]; then
+        local pid=$(cat "$HOSTAPD_PID_FILE")
+        if ps -p "$pid" > /dev/null; then
+            log_info "Stopping hostapd (PID: $pid)..."
+            if ! $SUDO kill "$pid"; then
+                log_warning "Initial kill failed for hostapd PID $pid. Trying TERM..."
+                sleep 2
+                $SUDO kill -TERM "$pid"
+                sleep 2
+            fi
+            if ps -p "$pid" > /dev/null; then
+                 log_warning "Forcing hostapd termination (PID: $pid)..."
+                 $SUDO kill -KILL "$pid"
+                 sleep 1
+            fi
+
+            if ! ps -p "$pid" > /dev/null; then
+                 log_info "Hostapd stopped."
+                 hostapd_stopped=1
+            else
+                 log_error "Failed to stop hostapd (PID: $pid)."
+            fi
+        else
+            log_info "Hostapd process (PID: $pid) not found, assuming already stopped."
+            hostapd_stopped=1 # Treat as stopped if PID file exists but process doesn't
+        fi
+        rm -f "$HOSTAPD_PID_FILE"
+    else
+        log_info "Hostapd PID file not found, assuming not running."
+        hostapd_stopped=1 # Treat as stopped if no PID file
+    fi
+
+    # Stop dnsmasq
+    if [[ -f "$DNSMASQ_PID_FILE" ]]; then
+        local pid=$(cat "$DNSMASQ_PID_FILE")
+        if ps -p "$pid" > /dev/null; then
+            log_info "Stopping dnsmasq (PID: $pid)..."
+             if ! $SUDO kill "$pid"; then
+                log_warning "Initial kill failed for dnsmasq PID $pid. Trying TERM..."
+                sleep 2
+                $SUDO kill -TERM "$pid"
+                sleep 2
+            fi
+             if ps -p "$pid" > /dev/null; then
+                 log_warning "Forcing dnsmasq termination (PID: $pid)..."
+                 $SUDO kill -KILL "$pid"
+                 sleep 1
+            fi
+
+            if ! ps -p "$pid" > /dev/null; then
+                log_info "Dnsmasq stopped."
+                dnsmasq_stopped=1
+            else
+                 log_error "Failed to stop dnsmasq (PID: $pid)."
+            fi
+        else
+            log_info "Dnsmasq process (PID: $pid) not found, assuming already stopped."
+            dnsmasq_stopped=1 # Treat as stopped
+        fi
+        rm -f "$DNSMASQ_PID_FILE"
+    else
+        log_info "Dnsmasq PID file not found, assuming not running."
+        dnsmasq_stopped=1 # Treat as stopped
+    fi
+    
+    # Set NetworkManager to manage the USB Wifi Interface if detected
+    if [[ -n "$WIFI_INTERFACE" ]]; then
+        log_info "Attempting to set interface '${WIFI_INTERFACE}' back to managed in NetworkManager..."
+        # Execute the nmcli command using the SUDO variable
+        if $SUDO nmcli dev set "$WIFI_INTERFACE" managed yes > /dev/null 2>&1; then
+            log_info "Successfully set '${WIFI_INTERFACE}' to managed via nmcli."
+        else
+            # The nmcli command returned an error
+            log_warning "Failed to set '${WIFI_INTERFACE}' back to managed via nmcli (exit code: $?)."
+            log_warning "You might need to do this manually: 'sudo nmcli dev set ${WIFI_INTERFACE} managed yes'"
+        fi
+    else
+        log_warning "Could not determine Wi-Fi interface to set back to managed."
+    fi
+
+    # Clean up config files
+    log_info "Cleaning up config files..."
+    rm -f "$HOSTAPD_CONF_FILE" "$DNSMASQ_CONF_FILE"
+
+    if [[ $hostapd_stopped -eq 1 && $dnsmasq_stopped -eq 1 ]]; then
+        log_info "Hotspot stopped successfully."
+        return 0
+    else
+        log_error "Hotspot may not have stopped cleanly."
+        return 1
+    fi
+}
+
+# --- Main Script Logic ---
+usage() {
+    echo "Usage: $SCRIPT_NAME <start SSID PASSWORD|stop>"
+    echo "  start SSID PASSWORD: Starts the Wi-Fi hotspot with the specified credentials."
+    echo "                     SSID: The name of the network."
+    echo "                     PASSWORD: The network password (min 8 characters)."
+    echo "  stop:              Stops the Wi-Fi hotspot services and cleans up."
+    echo
+    echo "Configuration:"
+    echo "  Channel:          ${CHANNEL} (5GHz)"
+    echo "  USB ID:           ${USB_ID}"
+    echo "  Fallback IFace:   ${FALLBACK_IFACE}"
+    echo "  Bridge:           ${BRIDGE_NAME} (${BRIDGE_IP})"
+    echo
+    echo "Important Prerequisites (Must be done manually):"
+    echo "  - Install 'hostapd', 'dnsmasq', 'iw', 'iptables', 'nmcli'."
+    echo "  - Create and bring up bridge interface '$BRIDGE_NAME'."
+    echo "  - Assign IP '$BRIDGE_IP/24' to '$BRIDGE_NAME'."
+    echo "  - Enable IP forwarding ('net.ipv4.ip_forward = 1')."
+    echo "  - Set up NAT/Masquerade rule in firewalld or iptables for traffic from '${SUBNET_CIDR}' via your internet interface."
+    echo "  - Ensure the target Wi-Fi interface ('$FALLBACK_IFACE' or detected) is not managed/connected by NetworkManager."
+    echo "  - Configure libvirt network to use '$BRIDGE_NAME'."
+}
+
+# --- Main Script Logic ---
+
+# Check basic argument presence
+if [[ "$#" -eq 0 ]]; then
+    usage
+    exit 1
+fi
+
+ACTION="$1"
+
+case "$ACTION" in
+    start)
+        # Expecting 3 arguments total: start SSID PASSWORD
+        if [[ "$#" -ne 3 ]]; then
+            log_error "Invalid arguments for 'start' action."
+            log_error "Requires SSID and PASSWORD."
+            usage
+            exit 1
+        fi
+        # Assign arguments to global variables
+        SSID="$2"
+        PASSWORD="$3"
+
+        # Validate password length
+        if [[ ${#PASSWORD} -lt 8 ]]; then
+            log_error "Password must be at least 8 characters long."
+            exit 1
+        fi
+
+        start_hotspot
+        ;;
+    stop)
+         # Expecting 1 argument total: stop
+        if [[ "$#" -ne 1 ]]; then
+            log_error "Invalid arguments for 'stop' action."
+            log_error "'stop' takes no additional arguments."
+            usage
+            exit 1
+        fi
+        stop_hotspot
+        ;;
+    *)
+        log_error "Invalid action: $ACTION"
+        usage
+        exit 1
+        ;;
+esac
+
+exit $?
