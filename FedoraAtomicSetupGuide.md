@@ -247,7 +247,7 @@ Log out and log in as your user (`christian`).
       <forward mode='bridge'/>
       <bridge name='br-hotspot'/>
     </network>
-    .```
+    ```
     
 `**Add the network to your VM**` 
 
