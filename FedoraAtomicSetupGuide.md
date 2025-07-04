@@ -9,7 +9,7 @@ This guide provides the steps required to set up a system using **Fedora Atomic*
 
 To use GPU passthrough on your Silverblue system, follow these steps:
 
-#### Bind VFIO-PPCI Driver to GPU
+#### Bind VFIO-PCI Driver to GPU
 
 1.  First, find the IDs for your GPU and GPU Audio using the command:
     
@@ -185,56 +185,56 @@ Log out and log in as your user (`christian`).
     sudo nmcli con up br-hotspot
     
 #### Configure firewalld to allow DHCP and DNS traffic coming in on the br-hotspot interface, destined for the dnsmasq server running locally
-    `#0. Create hotspot zone`
+##### 0. Create hotspot zone
     sudo firewall-cmd --permanent --new-zone=internal
-    `# 1. Assign bridge interface to the internal zone (if not already done)` 
+##### 1. Assign bridge interface to the internal zone (if not already done)
     sudo firewall-cmd --permanent --zone=internal --add-interface=br-hotspot
-    `# 2. Allow DHCP service in the 'internal' zone` 
+##### 2. Allow DHCP service in the 'internal' zone 
     sudo firewall-cmd --permanent --zone=internal --add-service=dhcp 
-    `# 3. Allow DNS service in the 'internal' zone` 
+##### 3. Allow DNS service in the 'internal' zone
     sudo firewall-cmd --permanent --zone=internal --add-service=dns 
-    `# 4. Reload firewalld to apply changes` 
+##### 4. Reload firewalld to apply changes
     sudo firewall-cmd --reload 
-    `# 5. Verify (optional)` 
+##### 5. Verify (optional) 
     sudo firewall-cmd --zone=hotspot --list-all
     
 
 #### Enable Internet Access On Bridge And Hotspot
 	
-	`**Enable Kernel IP Forwarding (Permanent):**`
-	`**# Create or modify a sysctl configuration file for persistence**` 
+##### Enable Kernel IP Forwarding (Permanent):
+###### Create or modify a sysctl configuration file for persistence
 	echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-forwarding.conf
-	`**# Apply the setting immediately without rebooting**` 
+###### Apply the setting immediately without rebooting
 	sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward	
 
-	`**Assign Interfaces and Sources to**` `**firewalld**` `**Zones:**`
-	`**# Assign the internet interface to the 'external' zone**`
+##### Assign Interfaces and Sources to firewalld Zones:
+###### Assign the internet interface to the 'external' zone
 	sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0
-	`**# Assign the hotspot bridge interface to the internal zone**` 
+###### Assign the hotspot bridge interface to the internal zone 
 	sudo firewall-cmd --permanent --zone=internal --change-interface=br-hotspot 
-	`**# (Optional: Explicitly assign the source subnet to internal zone**` 
+###### Optional: Explicitly assign the source subnet to internal zone 
 	sudo firewall-cmd --permanent --zone=internal -–add-source=192.168.42.0/24
 
-	`**Set External Zone as Default Zone and enable services available to previous default**`
+###### Set External Zone as Default Zone and enable services available to previous default
 	sudo firewall-cmd –set-default-zone=external
 	sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent
-	`**Enable Masquerading (NAT) on the External Zone:**`
+###### Enable Masquerading (NAT) on the External Zone:**`
 	sudo firewall-cmd --permanent --zone=external --add-masquerade 
 
-	`**Create Policy to Allow Forwarding from internal to external**`
-	`**# Create the policy object**` 
+##### Create Policy to Allow Forwarding from internal to external
+###### Create the policy object 
 	sudo firewall-cmd --permanent --new-policy PInt2Ext 
-	`**# Define traffic source zone (ingress)**` 
+###### Define traffic source zone (ingress) 
 	sudo firewall-cmd --permanent --policy PInt2Ext --add-ingress-zone=internal 
-	`**# Define traffic destination zone (egress)**` 
+###### Define traffic destination zone (egress) 
 	sudo firewall-cmd --permanent --policy PInt2Ext --add-egress-zone=external 
-	`**# Set the policy action to allow the traffic**` 
+###### Set the policy action to allow the traffic 
 	sudo firewall-cmd --permanent --policy PInt2Ext --set-target ACCEPT
 	
-	`**Apply All firewalld Changes**`
+###### Apply All firewalld Changes
 	sudo firewall-cmd --reload
 
-	`**Copy the hotspot script to a directory in the path to be used in the terminal**`
+###### Copy the hotspot script to a directory in the path to be used in the terminal
 	cd /var/mnt/DATAONE/Tools/Hotspot
 	sudo ./updatehotspot
 
@@ -252,7 +252,7 @@ Log out and log in as your user (`christian`).
 
 `Under "Network source", choose "Virtual network 'hotspot-bridged-net': Bridge``d Network``"`
 
-`**Troubleshooting**`
+#### Troubleshooting
 
 `No Internet In VM when hotspot not launched: Due to dnsmasq for the bridge not being launched, either launch it or create a static IP in the VM on the same subnet as the bridge.`
 
