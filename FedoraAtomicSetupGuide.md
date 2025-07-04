@@ -296,7 +296,7 @@ ip a
 
 2.  Add the following configuration to the file:
     
-
+```xml
 `[global]`
     `workgroup = SAMBA`
     `security = user`
@@ -320,6 +320,7 @@ ip a
     `create mask = 0755` 
     `directory mask = 0775`
     `valid users = christian`
+```
 
 ### 3\. **Enable SELinux for Shared Folders**
 
@@ -365,8 +366,15 @@ If this resolves the issue, you may need to adjust SELinux policies for a perman
 #### Add IVSHMEM Device to VM XML
 
 In your VM's XML configuration, add the following `shmem` device for **Looking Glass**:
-
-    <devices>
+```xml
+<devices>
+    ...
+    <shmem name="looking-glass">
+      <model type="ivshmem-plain"/>
+      <size unit="M">32</size>
+    </shmem>
+</devices>
+```
 
 To determine the appropriate size for your screen, use this formula:
 
@@ -403,28 +411,67 @@ Follow the Looking Glass documentation to install the **Looking Glass Host** in 
 #### CPU Pinning
 
 To pin specific virtual CPUs to physical cores, use the following in your VM XML:
-
-    <vcpu placement="static">
+```xml
+<vcpu placement="static">
+  <iothreads>1</iothreads>
+  <cputune>
+    <vcpupin vcpu="0" cpuset="1"/>
+    <vcpupin vcpu="1" cpuset="9"/>
+    <vcpupin vcpu="2" cpuset="2"/>
+    <vcpupin vcpu="3" cpuset="10"/>
+    <vcpupin vcpu="4" cpuset="3"/>
+    <vcpupin vcpu="5" cpuset="11"/>
+    <vcpupin vcpu="6" cpuset="4"/>
+    <vcpupin vcpu="7" cpuset="12"/>
+    <vcpupin vcpu="8" cpuset="5"/>
+    <vcpupin vcpu="9" cpuset="13"/>
+    <vcpupin vcpu="10" cpuset="6"/>
+    <vcpupin vcpu="11" cpuset="14"/>
+    <vcpupin vcpu="12" cpuset="7"/>
+    <vcpupin vcpu="13" cpuset="15"/>
+    <emulatorpin cpuset="0,8"/>
+    <iothreadpin iothread="1" cpuset="0,8"/>
+  </cputune>
+</vcpu>
+```
 
 #### Add CPU Cache and Topology
 
 Add this to the `<topology>` section:
-
-    <cache mode="passthrough"/>
+```xml
+<cache mode="passthrough"/>
+<feature policy="require" name="topoext"/>
+```
 
 #### ACPITable and Overcommit
 
 Add the following `<qemu:commandline>` entries:
-
-    <qemu:commandline>
+```xml
+<qemu:commandline>
+  <qemu:arg value="-acpitable"/>
+  <qemu:arg value="file=/var/mnt/DATAONE/VMs/images/acpitable.bin"/>
+  <qemu:arg value="-overcommit"/>
+  <qemu:arg value="cpu-pm=on"/>
+</qemu:commandline>
+```
 
 To avoid permissions errors, add the `acpitable.bin` as a CD-ROM to your VM.
 
 #### Hyper-V Settings for VM
 
 Add the following to the `<hyperv>` section of the XML:
-
-    <hyperv>
+```xml
+<hyperv>
+  <relaxed state="on"/>
+  <vapic state="on"/>
+  <spinlocks state="on" retries="8191"/>
+  <vpindex state="on"/>
+  <synic state="on"/>
+  <stimer state="on"/>
+  <reset state="on"/>
+  <frequencies state="on"/>
+</hyperv>
+```
 
 ### Enable running Games via Network Share
 
