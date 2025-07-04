@@ -1,0 +1,934 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+	<title></title>
+	<meta name="generator" content="LibreOffice 25.2.4.3 (Linux)"/>
+	<meta name="created" content="2025-03-27T23:58:00.272134708"/>
+	<meta name="changed" content="2025-06-10T01:44:18.726433982"/>
+	<style type="text/css">
+		@page { size: 8.5in 11in; margin: 0.79in }
+		p { line-height: 115%; margin-bottom: 0.1in; background: transparent }
+		p.western { font-family: "Cantarell" }
+		h1 { margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h1.western { font-weight: bold; font-size: 24pt; font-family: "Cantarell" }
+		h1.cjk { font-weight: bold; font-size: 24pt; font-family: "Noto Serif CJK SC" }
+		h1.ctl { font-weight: bold; font-family: "Noto Sans"; font-size: 24pt }
+		h3 { margin-top: 0.1in; margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h3.western { font-weight: bold; font-size: 14pt; font-family: "Cantarell" }
+		h3.cjk { font-weight: bold; font-size: 14pt; font-family: "Noto Serif CJK SC" }
+		h3.ctl { font-weight: bold; font-family: "Noto Sans"; font-size: 14pt }
+		h4 { margin-top: 0.08in; margin-bottom: 0.08in; background: transparent; page-break-after: avoid }
+		h4.western { font-weight: bold; font-size: 12pt; font-family: "Cantarell" }
+		h4.cjk { font-weight: bold; font-size: 12pt; font-family: "Noto Serif CJK SC" }
+		h4.ctl { font-weight: bold; font-family: "Noto Sans"; font-size: 12pt }
+		pre { background: transparent }
+		pre.western { font-family: "Liberation Mono", monospace; font-size: 10pt }
+		pre.cjk { font-family: "Noto Sans Mono CJK SC", monospace; font-size: 10pt }
+		pre.ctl { font-family: "Liberation Mono", monospace; font-size: 10pt }
+		strong { font-weight: bold }
+		code.western { font-family: "Liberation Mono", monospace }
+		code.cjk { font-family: "Noto Sans Mono CJK SC", monospace }
+		code.ctl { font-family: "Liberation Mono", monospace }
+		a:link { color: #000080; text-decoration: underline }
+		em { font-style: italic }
+	</style>
+</head>
+<body lang="en-US" link="#000080" vlink="#800000" dir="ltr"><h1 class="western">
+Christian's <strong><font face="Cantarell">Fedora Atomic</font></strong>
+Setup Guide</h1>
+<p class="western"><font face="Cantarell">This guide provides the
+steps required to set up a system using </font><strong><font face="Cantarell">Fedora
+Atomic</font></strong><font face="Cantarell"> with VFIO (Virtual
+Function I/O) support for GPU passthrough, NVIDIA drivers, libvirt
+setup, disk management, and virtual machine (VM) tuning. Each section
+includes the necessary commands and explanations for configuration.</font></p>
+<hr/>
+
+<h3 class="western">Setup VFIO for GPU Passthrough</h3>
+<p class="western">To use GPU passthrough on your Silverblue system,
+follow these steps:</p>
+<h4 class="western">Bind VFIO-PPCI Driver to GPU</h4>
+<ol>
+	<li><p class="western">First, find the IDs for your GPU and GPU
+	Audio using the command:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">lspci -nnk</code></pre><p class="western">
+	This will list all PCI devices and their IDs. Note down the IDs for
+	your GPU and GPU Audio.</p></li>
+	<li><p class="western">Use the following command to bind the
+	<code class="western">vfio-pci</code> driver to your GPU. Replace
+	the IDs with those you noted from the previous step:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree kargs --append-if-missing=rd.driver.pre=vfio_pci --append-if-missing=amd_iommu=on --append-if-missing=iommu=pt --append-if-missing=&quot;vfio-pci.ids=10de:2860,10de:22bd&quot;</code></pre></li>
+	<li><p class="western">If you are using proprietary NVIDIA drivers,
+	add the following additional parameters:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">--append-if-missing=video=efifb:off --append-if-missing=rd.driver.blacklist=nouveau --append-if-missing=modprobe.blacklist=nouveau --append-if-missing=nvidia-drm.modeset=1</code></pre></li>
+</ol>
+<h4 class="western">Update the Initramfs</h4>
+<p class="western">To ensure the VFIO driver is included in the
+initramfs (initial RAM filesystem), run the following:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree initramfs --enable --arg=&quot;--add-drivers&quot; --arg=&quot;vfio-pci&quot;</code></pre><h3 class="western">
+Install VM Packages</h3>
+<p class="western">To manage virtual machines, you'll need the
+following packages:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree install qemu-kvm-core libvirt virt-manager samba </code><code class="western">dnsmasq </code><code class="western">hostapd</code></pre><h3 class="western">
+Install NVIDIA Drivers (Optional)</h3>
+<p class="western">If you are using an NVIDIA GPU, you may want to
+install proprietary NVIDIA drivers. Follow these steps:</p>
+<ol>
+	<li><p class="western">Add RPM Fusion repositories for both free and
+	non-free software:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree install --apply-live https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm</code></pre></li>
+	<li><p class="western">Update the repositories:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree update --uninstall rpmfusion-free-release-$(rpm -E %fedora)-1.noarch --uninstall rpmfusion-nonfree-release-$(rpm -E %fedora)-1.noarch --install rpmfusion-free-release --install rpmfusion-nonfree-release</code></pre></li>
+	<li><p class="western">Install NVIDIA-related packages:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">rpm-ostree install akmod-nvidia xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-power</code></pre></li>
+</ol>
+<h4 class="western">Reboot</h4>
+<p class="western">Before proceeding with additional configuration,
+reboot your system to apply changes.</p>
+<h4 class="western">NVIDIA Continued (Optional)</h4>
+<p class="western">Enable and mask NVIDIA services:</p>
+<pre class="western"><code class="western">sudo systemctl enable nvidia-{suspend,resume,hibernate}</code>
+<code class="western">sudo systemctl mask nvidia-fallback.service</code></pre><h3 class="western">
+Setup Libvirt Hooks</h3>
+<ol>
+	<li><p class="western">Create the directory for Libvirt hooks:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">mkdir -p /etc/libvirt/hooks</code></pre></li>
+	<li><p class="western">Navigate to the hooks directory and run the
+	hook update script:</p>
+	<pre class="western"><code class="western">cd /to/hooks/folder</code>
+<code class="western">sudo updatehooks.sh</code></pre></li>
+	<li><p class="western">Enable the <code class="western">libvirtd</code>
+	service to start automatically:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">sudo systemctl enable --now libvirtd</code></pre></li>
+</ol>
+<h3 class="western">Add User to the Libvirt Group</h3>
+<ol>
+	<li><p class="western">Switch to the root user:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">sudo su</code></pre></li>
+	<li><p class="western">Add the current user to the <code class="western">libvirt</code>
+	group by editing the <code class="western">/etc/group</code> file:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">grep -E '^libvirt:' /usr/lib/group &gt;&gt; /etc/group</code></pre></li>
+	<li><p class="western">Exit from the root session:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">exit</code></pre></li>
+	<li><p class="western">Add your user to the <code class="western">libvirt</code>
+	group:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">sudo usermod -aG libvirt $USER</code></pre></li>
+</ol>
+<h3 class="western">Auto Decrypt and Mount Disks, Replace Home
+Directory</h3>
+<h4 class="western">Set Root Account Password</h4>
+<ol>
+	<li><p class="western">Switch to the root user and set a password:</p>
+	<pre class="western"><code class="western">sudo su</code>
+<code class="western">passwd</code></pre></li>
+	<li><p class="western">Log out and log in as root.</p></li>
+</ol>
+<h4 class="western">Enable Automatic Decrypting</h4>
+<ol>
+	<li><p class="western">To enable automatic decryption for encrypted
+	partitions, you can either use <strong>GNOME Disks</strong> or do it
+	manually by creating a keyfile:</p>
+	<pre class="western"><code class="western">head -c 512 /dev/random &gt; /etc/uuid.key</code>
+<code class="western">cryptsetup luksAddKey /dev/disk/by-uuid/uuid /etc/uuid.key</code></pre></li>
+	<li><p class="western">Edit the <code class="western">/etc/crypttab</code>
+	file to auto-decrypt at boot:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">echo &quot;luks-uuid UUID=uuid /etc/uuid.key luks,nofail&quot; &gt;&gt; /etc/crypttab</code></pre></li>
+</ol>
+<h4 class="western">Create Folders and Mount Primary Storage</h4>
+<ol>
+	<li><p class="western">Create a folder for mounting the storage
+	drive/partition:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">mkdir -p /var/mnt/DATAONE</code></pre></li>
+	<li><p class="western">Mount the partition either through <strong>GNOME
+	Disks</strong>, <strong>KDE Partition Manager</strong>, <strong>GParted</strong>,
+	or manually by editing <code class="western">/etc/fstab</code>.</p></li>
+</ol>
+<h4 class="western">Backup Original Home Directory</h4>
+<p class="western">Backup your current home directory to prevent data
+loss:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">rsync -av /var/home/christian /var/home/.christianorig</code></pre><h4 class="western">
+Bind Mount Home Directory</h4>
+<ol>
+	<li><p class="western">Remove the existing home directory:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">rm -rf /var/home/christian</code></pre></li>
+	<li><p class="western">Create a new directory:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">mkdir -p /var/home/christian</code></pre></li>
+	<li><p class="western">Edit <code class="western">/etc/fstab</code>
+	to bind mount the home directory from the primary storage partition:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">echo &quot;/var/mnt/DATAONE/christian /var/home/christian none bind,nofail,x-systemd.device-timeout=2  0 0&quot; &gt;&gt; /etc/fstab</code></pre></li>
+</ol>
+<h4 class="western">Restore SELinux Contexts and Fix Permissions</h4>
+<ol>
+	<li><p class="western">Restore SELinux contexts:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">restorecon -R /var/home/christian</code></pre></li>
+	<li><p class="western">Change ownership of the directories:</p>
+	<pre class="western"><code class="western">chown -R christian:christian /var/home/christian</code>
+<code class="western">chown -R christian:christian /var/mnt/DATAONE</code></pre></li>
+</ol>
+<h4 class="western">Mount All Filesystems</h4>
+<p class="western">Test the mount:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">mount -a</code></pre><p class="western">
+Log out and log in as your user (<code class="western">christian</code>).</p>
+<h3 class="western">Shared Hotspot And VM Network Setup</h3>
+<ul>
+	<li style="display: block"><pre class="western" style="line-height: 114%; border: none; padding: 0in"><font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><b>Add the bridge connection profile</b></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes</i></font></font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><b>Configure the bridge IP address</b></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.</i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>42</i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>.1/24 </i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>#</i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">No gateway needed on the bridge itself</span></span></font></font></code></font>
+
+<code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><b>Disable Spanning Tree Protocol (usually not needed for a simple setup)</b></font></font></code>
+<code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>sudo nmcli con modify br-hotspot bridge.stp no</i></font></font></code>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><b>Bring the connection up (might already be up due to autoconnect)</b></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i>sudo nmcli con up br-hotspot</i></font></font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Configure firewalld to allow DHCP and DNS traffic coming </b></span></font></font></code><code class="western"><em><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>in</b></span></font></em></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b> on the br-hotspot interface, destined for the dnsmasq server running locally</b></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">#0. Create hotspot zone</span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --new-zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">internal</span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal"># 1. Assign bridge interface to the '</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">internal</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">' zone (if not already done) </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal"> --add-interface=br-hotspot </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal"># 2. Allow DHCP service in the 'internal' zone </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal"> --add-service=dhcp </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal"># 3. Allow DNS service in the 'internal' zone </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal"> --add-service=dns </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal"># 4. Reload firewalld to apply changes </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --reload </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal"># 5. Verify (optional) </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">sudo firewall-cmd --zone=hotspot --list-all</span></i></font></font></code></font>
+</pre></li>
+</ul>
+<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal">	</span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Enable </b></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Internet Access On Bridge And Hotspot</b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Enable Kernel IP Forwarding (Permanent):</b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Create or modify a sysctl configuration file for persistence </b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">echo &quot;net.ipv4.ip_forward = 1&quot; | sudo tee /etc/sysctl.d/99-forwarding.conf </span></i></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Apply the setting immediately without rebooting </b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code></font>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	Assign Interfaces and Sources to </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>firewalld</b></span></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> Zones:</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Assign the internet interface to the 'external' zone</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0 </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Assign the hotspot bridge interface to the '</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>' zone </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> --change-interface=br-hotspot </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# (Optional</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>)</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> Explicitly assign the source subnet to '</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>' zone </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> –add-source=192.168.42.0/24</span></i></font></font></code>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Set External Zone </b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>as</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> Default Zone </b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>and enable services available to previous default</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>:</b></span></font></font></code>
+	<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd –set-default-zone=external</span></i></font></font></code>
+	<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent<br/>
+</span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Enable Masquerading (NAT) on the External Zone:</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal">	</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=external --add-masquerade </span></i></font></font></code>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Create Policy to Allow Forwarding from </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> to </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>external</b></span></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Create the policy object </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --new-policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Define traffic source zone (ingress) </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --add-ingress-zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Define traffic destination zone (egress) </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --add-egress-zone=external </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Set the policy action to allow the traffic </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --set-target ACCEPT</span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	Apply All firewalld Changes</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --reload</span></i></font></font></code>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Copy the hotspot script to a directory in the path to be used in the terminal</b></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">cd /var/mnt/DATAONE/Tools/Hotspot</span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">	sudo ./updatehotspot</span></i></font></font></code></font>
+</pre>
+<ol>
+	<li style="display: block"><p class="western" style="line-height: 114%; border: none; padding: 0in">
+	<strong><font face="Cantarell">Create a libvirt network </font></strong><strong><font face="Cantarell">using
+	the following XML</font></strong><font face="Cantarell">:</font></p>
+	<p class="western" style="line-height: 114%; border: none; padding: 0in">
+	<font face="Cantarell">XML</font></p>
+	<pre class="western" style="line-height: 114%; border: none; padding: 0in"><font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt">&lt;network&gt;</font></font></code></font>
+<code class="western">  </code><font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">&lt;name&gt;hotspot-bridged-net&lt;/name&gt; </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">&lt;forward mode='bridge'/&gt;      </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">&lt;bridge name='br-hotspot'/&gt;    </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">&lt;/network&gt;</span></i></font></font></code></font></pre></li>
+</ol>
+<pre class="western" style="line-height: 114%; border: none; padding: 0in">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Add the network to your VM </b></span></font></font></code></font></pre><p class="western" style="border: none; padding: 0in; line-height: 114%">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">	Under
+&quot;Network source&quot;, choose &quot;Virtual network
+'hotspot-bridged-net': Bridge</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">d
+	Network</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">&quot;</span></span></font></font></code></font></p>
+<p class="western" style="border: none; padding: 0in; line-height: 114%">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">	</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>Troubleshooting</b></span></font></font></code></font></p>
+<p class="western" style="border: none; padding: 0in; line-height: 114%">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">No
+Internet In VM when hotspot not launched: Due to dnsmasq for the
+bridge not 	being launched, either launch it or create a static IP in
+the VM on the same subnet as the 	bridge.</span></span></font></font></code></font></p>
+<p class="western" style="border: none; padding: 0in; line-height: 114%">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">	</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">No
+Internet In VM OR Hotspot: Check firewalld or iptables to see if the
+traffic from the 	bridge is being natted via the interface facing
+interface. </span></span></font></font></code></font>
+</p>
+<p class="western" style="border: none; padding: 0in; line-height: 114%">
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="3" style="font-size: 12pt"><span style="font-style: normal"><span style="font-weight: normal">	Misc:
+Ensure the bridge is created, and check that any services uses the
+network 	interfaces are running or that the network interfaces
+required by them haven’t changed 	names.</span></span></font></font></code></font></p>
+<h3 class="western">Flatpak Setup</h3>
+<h4 class="western">Enable Flathub User Repo</h4>
+<p class="western">To install Flatpaks, add the Flathub repository:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo</code></pre><h4 class="western">
+Install Firefox via Flatpak (Optional)</h4>
+<p class="western">If you don’t have Firefox installed yet, install
+it with the following command:</p>
+<pre class="western" style="margin-bottom: 0.2in"><code class="western">flatpak install --user flathub org.mozilla.firefox flathub org.freedesktop.Platform.ffmpeg-full</code></pre><h3 class="western">
+<code class="western"><font face="Cantarell">Setup Samba for sharing
+files</font></code></h3>
+<h3 class="western">1. <strong>Set Samba User Password</strong></h3>
+<p class="western">Start by adding the Samba user with a password.
+This user will be used for authentication when accessing shared
+files.</p>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo smbpasswd -a christian</code></font></pre><h3 class="western">
+2. <strong>Configure Samba Settings</strong></h3>
+<p class="western">Next, modify the Samba configuration file
+(<code class="western">/etc/samba/smb.conf</code>) to define global
+settings and shared directories. Ensure to also set Samba to bind to
+the Libvirt interface, you can check the network interfaces on your
+system by running:</p>
+<p class="western"><font face="Liberation Mono, monospace"><font size="2" style="font-size: 10pt">ip
+a</font></font></p>
+<ol>
+	<li><p class="western">Open the <code class="western">smb.conf</code>
+	file for editing:</p></li>
+</ol>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo nano /etc/samba/smb.conf</code></font></pre>
+<ol start="2">
+	<li><p class="western">Add the following configuration to the file:</p></li>
+</ol>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">[global]</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">workgroup = SAMBA</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">security = user</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">passdb backend = tdbsam</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">bind interfaces only = yes</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">interfaces = virbr0,br-hotspot</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">force user = christian</code></font>
+
+<font face="Liberation Mono, monospace"><code class="western">[Shared]</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">path = /var/mnt/DATAONE/Shared</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">browseable = no</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">read only = no</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">create mask = 0755 </code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">directory mask = 0775</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">valid users = christian</code></font>
+
+<font face="Liberation Mono, monospace"><code class="western">[Creative]</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">path = /var/mnt/DATAONE/Creative</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">browseable = no</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">read only = no</code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">create mask = 0755 </code></font>
+<code class="western">    </code><font face="Liberation Mono, monospace"><code class="western">directory mask = 0775</code></font>
+<code class="western">    </code><code class="western">valid users = christian</code></pre><h3 class="western">
+3. <strong>Enable SELinux for Shared Folders</strong></h3>
+<p class="western">If the shared folders are inside your home
+directory, you need to enable SELinux rules to allow Samba to access
+them.</p>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo setsebool -P samba_enable_home_dirs on</code></font>
+<code class="western">sudo setsebool -P samba_export_all_rw=1</code>
+<code class="western">sudo setsebool -P samba_export_all_ro=1</code>
+<code class="western">sudo setsebool -P samba_share_fusefs=1</code>
+<code class="western">sudo setsebool -P virt_use_samba=1</code><code class="western"><font face="monospace"><br/>
+<br/>
+</font></code></pre><h3 class="western">
+4. <strong>Add Firewall Exceptions for Samba</strong></h3>
+<p class="western">Ensure that the firewall allows Samba traffic. Add
+an exception for Samba service to your firewall configuration.</p>
+<ol>
+	<li><p class="western">Add the firewall exception:</p></li>
+</ol>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo firewall-cmd --zone=</code><code class="western">internal</code><code class="western"> --add-service=samba –permanent</code></font>
+<font face="Liberation Mono, monospace"><code class="western">sudo firewall-cmd --zone=</code><code class="western">libvirt</code><code class="western"> --add-service=samba --permanent</code></font></pre>
+<ol start="2">
+	<li><p class="western">Reload the firewall configuration:</p></li>
+</ol>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo firewall-cmd --reload</code></font></pre><h3 class="western">
+5. <strong>Start Samba Service</strong></h3>
+<p class="western">Finally, start the Samba service to enable file
+sharing.</p>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo systemctl start smb.service</code></font></pre><h3 class="western">
+6. <strong>Troubleshooting: Disable SELinux Temporarily (If Needed)</strong></h3>
+<p class="western">If you're unable to connect to the shared folders
+from a VM, SELinux may be causing the issue. You can temporarily
+disable SELinux to test this:</p>
+<pre class="western" style="margin-bottom: 0.1in; line-height: 115%"><font face="Liberation Mono, monospace"><code class="western">sudo setenforce 0</code></font></pre><p class="western">
+If this resolves the issue, you may need to adjust SELinux policies
+for a permanent solution.</p>
+<h3 class="western">Setup Looking Glass</h3>
+<h4 class="western">Add IVSHMEM Device to VM XML</h4>
+<p class="western">In your VM's XML configuration, add the following
+<code class="western">shmem</code> device for <strong>Looking Glass</strong>:</p>
+<pre class="western"><code class="western">&lt;devices&gt;</code>
+<code class="western">    </code><code class="western">...</code>
+<code class="western">    </code><code class="western">&lt;shmem name=&quot;looking-glass&quot;&gt;</code>
+<code class="western">      </code><code class="western">&lt;model type=&quot;ivshmem-plain&quot;/&gt;</code>
+<code class="western">      </code><code class="western">&lt;size unit=&quot;M&quot;&gt;32&lt;/size&gt;</code>
+<code class="western">    </code><code class="western">&lt;/shmem&gt;</code>
+<code class="western">&lt;/devices&gt;</code></pre><p class="western">
+To determine the appropriate size for your screen, use this formula:</p>
+<ol>
+	<li><p class="western"><strong>Calculate total bytes</strong>:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">w * h * 4 * 2</code></pre></li>
+	<li><p class="western"><strong>Convert to MiB</strong>:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">total bytes / 1024 / 1024 = total MiB + 10</code></pre></li>
+</ol>
+<p class="western">For a 1080p screen:</p>
+<pre class="western"><code class="western">1920 * 1080 * 4 * 2 = 16,588,800 bytes</code>
+<code class="western">16,588,800 / 1024 / 1024 = 15.82 MiB + 10 = 25.82 MiB, round to 32 MiB</code></pre><h4 class="western">
+Create Shared Memory Block on Host</h4>
+<ol>
+	<li><p class="western">Create a temporary file for the shared
+	memory:</p>
+	<pre class="western"><code class="western">echo &quot;#Type Path               Mode UID  GID Age Argument&quot; &gt;&gt; /etc/tmpfiles.d/10-looking-glass.conf</code>
+<code class="western">echo &quot;f /dev/shm/looking-glass 0660 christian kvm -&quot; &gt;&gt; /etc/tmpfiles.d/10-looking-glass.conf</code></pre></li>
+	<li><p class="western">Create the temporary files immediately:</p>
+	<pre class="western" style="margin-bottom: 0.2in"><code class="western">sudo systemd-tmpfiles --create /etc/tmpfiles.d/10-looking-glass.conf</code></pre></li>
+</ol>
+<h4 class="western">Install Looking Glass Host in VM</h4>
+<p class="western">Follow the Looking Glass documentation to install
+the <strong>Looking Glass Host</strong> in the VM and build the
+<strong>Looking Glass Client</strong> for the host.</p>
+<h3 class="western">VM Tuning</h3>
+<h4 class="western">CPU Pinning</h4>
+<p class="western">To pin specific virtual CPUs to physical cores,
+use the following in your VM XML:</p>
+<pre class="western"><code class="western">&lt;vcpu placement=&quot;static&quot;&gt;</code>
+<code class="western">  </code><code class="western">&lt;iothreads&gt;1&lt;/iothreads&gt;</code>
+<code class="western">  </code><code class="western">&lt;cputune&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;0&quot; cpuset=&quot;1&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;1&quot; cpuset=&quot;9&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;2&quot; cpuset=&quot;2&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;3&quot; cpuset=&quot;10&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;4&quot; cpuset=&quot;3&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;5&quot; cpuset=&quot;11&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;6&quot; cpuset=&quot;4&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;7&quot; cpuset=&quot;12&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;8&quot; cpuset=&quot;5&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;9&quot; cpuset=&quot;13&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;10&quot; cpuset=&quot;6&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;11&quot; cpuset=&quot;14&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;12&quot; cpuset=&quot;7&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;vcpupin vcpu=&quot;13&quot; cpuset=&quot;15&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;emulatorpin cpuset=&quot;0,8&quot;/&gt;</code>
+<code class="western">    </code><code class="western">&lt;iothreadpin iothread=&quot;1&quot; cpuset=&quot;0,8&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;/cputune&gt;</code>
+<code class="western">&lt;/vcpu&gt;</code></pre><h4 class="western">
+Add CPU Cache and Topology</h4>
+<p class="western">Add this to the <code class="western">&lt;topology&gt;</code>
+section:</p>
+<pre class="western"><code class="western">&lt;cache mode=&quot;passthrough&quot;/&gt;</code>
+<code class="western">&lt;feature policy=&quot;require&quot; name=&quot;topoext&quot;/&gt;</code></pre><h4 class="western">
+ACPITable and Overcommit</h4>
+<p class="western">Add the following <code class="western">&lt;qemu:commandline&gt;</code>
+entries:</p>
+<pre class="western"><code class="western">&lt;qemu:commandline&gt;</code>
+<code class="western">  </code><code class="western">&lt;qemu:arg value=&quot;-acpitable&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;qemu:arg value=&quot;file=/var/mnt/DATAONE/VMs/images/acpitable.bin&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;qemu:arg value=&quot;-overcommit&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;qemu:arg value=&quot;cpu-pm=on&quot;/&gt;</code>
+<code class="western">&lt;/qemu:commandline&gt;</code></pre><p class="western">
+To avoid permissions errors, add the <code class="western">acpitable.bin</code>
+as a CD-ROM to your VM.</p>
+<h4 class="western">Hyper-V Settings for VM</h4>
+<p class="western">Add the following to the <code class="western">&lt;hyperv&gt;</code>
+section of the XML:</p>
+<pre class="western"><code class="western">&lt;hyperv&gt;</code>
+<code class="western">  </code><code class="western">&lt;relaxed state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;vapic state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;spinlocks state=&quot;on&quot; retries=&quot;8191&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;vpindex state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;synic state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;stimer state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;reset state=&quot;on&quot;/&gt;</code>
+<code class="western">  </code><code class="western">&lt;frequencies state=&quot;on&quot;/&gt;</code>
+<code class="western">&lt;/hyperv&gt;</code></pre><h3 class="western">
+Enable running Games via Network Share</h3>
+<h4 class="western">For GOG Games</h4>
+<p class="western">EnableLinkedConnections registry value enables
+Windows Vista, Windows 7, Windows 8, Windows 8.1, Windows 10 or later
+to share network connections between the filtered access token and
+the full administrator access token for a member of the
+Administrators group. After you configure this registry value, LSA
+checks whether there is another access token that is associated with
+the current user session if a network resource is mapped to an access
+token. If LSA determines that there is a linked access token, it adds
+the network share to the linked location. <br/>
+<br/>
+1. Run Registry
+Editor (regedit). <br/>
+2. Navigation to the following registry key:
+<br/>
+HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+<br/>
+3. Right click on System, then point to New, and then click
+DWORD (32-bit) Value. <br/>
+4. Type EnableLinkedConnections, and then
+press ENTER. <br/>
+5. Right-click EnableLinkedConnections, and then
+click Modify. <br/>
+6. In the Value data box, type 1, and then click
+OK. <br/>
+7. Restart the computer. 
+</p>
+<h4 class="western">For EA Games/Ubisoft/Etc.</h4>
+<p class="western">EA uses a Background service called
+&quot;EABackgroundService&quot; - This runs as a System service, and
+not the logged-in user.</p>
+<p class="western">As the default user, creation of network files are
+only accessible via the user who generated the Mapping - EA's
+background service cannot see the mapped drive. As such we have to
+create it as the SYSTEM user.</p>
+<p class="western"><strong>Step one:</strong> Create a BAT script
+with the following command</p>
+<p class="western"><code class="western">net use z:
+</code><code class="western"><a href="//servername/sharedfolder"><font color="#ffffff">\\servername\sharedfolder</font></a></code><code class="western">
+</code><code class="western">/user:username password</code></p>
+<p class="western"><code class="western"><font face="Cantarell"><b>Step
+two:  </b></font></code><code class="western"><font face="Cantarell"><span style="font-weight: normal">Add
+the bat script to run at startup</span></font></code></p>
+<ul>
+	<li><p class="western"><code class="western"><font face="Cantarell"><span style="font-weight: normal">Open
+	the Local Group Policy Editor.</span></font></code></p></li>
+</ul>
+<ul>
+	<li><p class="western"><font face="Cantarell">In the console tree,
+	click <strong>Scripts (Startup/Shutdown)</strong> . The path is
+	<strong>Computer Configuration\Windows Settings\Scripts
+	(Startup/Shutdown)</strong> .</font></p></li>
+</ul>
+<ul>
+	<li><p class="western"><font face="Cantarell">In the results pane,
+	double-click <strong>Startup</strong> .</font></p></li>
+</ul>
+<ul>
+	<li><p class="western"><font face="Cantarell">In the </font><strong><font face="Cantarell">Startup
+	Properties</font></strong><font face="Cantarell"> dialog box, click
+	</font><strong><font face="Cantarell">Add</font></strong><font face="Cantarell">
+	 </font><font face="Cantarell">and select the BAT script from the
+	previous step</font><font face="Cantarell">.</font></p></li>
+</ul>
+<p class="western"><font face="Cantarell"><b>Step three</b>: Restart
+the VM.</font></p>
+<p class="western"><strong>WARNING</strong>: You can only remove this
+mapping the same way you created it, from the SYSTEM account. If you
+need to remove it, follow steps 1 and 2 but change the command  to
+<code class="western">net use z: /delete</code>.</p>
+<p class="western"><strong>NOTE</strong>: The newly created mapped
+drive will now appear for ALL users of this system but they will see
+it displayed as &quot;Disconnected Network Drive (Z:)&quot;. Do not
+let the name fool you. It may claim to be disconnected but it will
+work for everyone.</p>
+<h3 class="western">Additional Tweaks</h3>
+<p class="western">For more optimizations and tweaks, refer to the
+<code class="western">qemu</code> script in the hooks directory.</p>
+<h3 class="western">Manual Configuration For Shared Network With
+Hotspot for VM (EXTRA DOCUMENTATION, ALREADY COVERED IN MAIN SECTION)</h3>
+<p class="western"><font face="Cantarell">Okay, let's break down how
+to achieve this setup. The core idea is to create a separate network
+for your hotspot clients and the VM, bridged together, and then route
+traffic from this network to the internet via your host's primary
+Wi-Fi connection (</font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">).
+We'll use the USB Wi-Fi adapter (</font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">)
+for the hotspot.</font></p>
+<div id="model-response-message-contentr_eb07860e5b5bb550" dir="ltr"><p class="western" style="line-height: 114%">
+	<font face="Cantarell">You are correct that bridging a standard
+	Wi-Fi client interface (</font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">
+	in your case) is generally not possible due to 802.11 protocol
+	limitations. However, bridging a Wi-Fi interface operating in Access
+	Point (AP) mode (</font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">)
+	</font><em><font face="Cantarell">is</font></em><font face="Cantarell">
+	possible and is the standard way to connect AP clients to a wired
+	(or in this case, virtual) network. Macvtap in bridge mode wouldn't
+	work with </font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">
+	either for the same reasons.</font></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">Using
+	a libvirt </font><em><font face="Cantarell">routed</font></em><font face="Cantarell">
+	network would isolate the VM on its own subnet, requiring routing
+	between the hotspot clients' subnet and the VM's subnet. While
+	possible, it adds complexity and might interfere with device
+	discovery protocols. A </font><em><font face="Cantarell">bridged</font></em><font face="Cantarell">
+	setup where the hotspot clients and the VM share the same Layer 2
+	network is simpler and directly meets your requirement for seamless
+	access without port forwarding.</font></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">We
+	will create a bridge interface on the host, add the USB Wi-Fi card
+	(in AP mode) to this bridge, and then configure the libvirt network
+	to use this existing host bridge. We will use </font><code class="western"><font face="Cantarell">iproute2</font></code><font face="Cantarell">
+	or </font><code class="western"><font face="Cantarell">nmcli</font></code><font face="Cantarell">
+	for bridge management instead of </font><code class="western"><font face="Cantarell">bridge-utils</font></code><font face="Cantarell">.</font></p>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Prerequisites:</font></strong></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Identify Interfaces:</font></strong><font face="Cantarell">
+		Confirm your PCIe Wi-Fi is </font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">
+		and your USB Wi-Fi is </font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">.
+		Use </font><code class="western"><font face="Cantarell">iw dev</font></code><font face="Cantarell">
+		or </font><code class="western"><font face="Cantarell">ip link</font></code><font face="Cantarell">
+		to verify. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Check USB Wi-Fi Capabilities:</font></strong><font face="Cantarell">
+		Ensure </font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">
+		supports AP (Access Point) mode and 5GHz. Run </font><code class="western"><font face="Cantarell">iw
+		list</font></code><font face="Cantarell"> and look under the
+		section for your USB adapter (</font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">).
+		Check for </font><code class="western"><font face="Cantarell">Supported
+		interface modes:</font></code><font face="Cantarell"> (should
+		include </font><code class="western"><font face="Cantarell">AP</font></code><font face="Cantarell">)
+		and </font><code class="western"><font face="Cantarell">Band 2:</font></code><font face="Cantarell">
+		(should list 5GHz channels/frequencies). </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Install Necessary Software:</font></strong><font face="Cantarell">
+		</font>
+		</p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"># Debian/Ubuntu based</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo apt update</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo apt install hostapd dnsmasq</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Fedora/RHEL based</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo dnf update</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo dnf install hostapd dnsmasq</font></code></font></pre><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<em><font face="Cantarell">(Note:
+		</font></em><em><code class="western"><font face="Cantarell">iptables-persistent</font></code></em><em><font face="Cantarell">/</font></em><em><code class="western"><font face="Cantarell">iptables-services</font></code></em><em><font face="Cantarell">
+		is for saving firewall rules across reboots).</font></em><font face="Cantarell">
+		</font>
+		</p></li>
+	</ol>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Steps:</font></strong></p>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Step
+	1: Create a Network Bridge on the Host</font></strong></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">We'll
+	create a bridge interface (e.g., </font><code class="western"><font face="Cantarell">br-hotspot</font></code><font face="Cantarell">)
+	that will connect the hotspot interface (</font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">)
+	and the VM's virtual NIC.</font></p>
+	<ul>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Using </font></strong><strong><code class="western"><font face="Cantarell">iproute2</font></code></strong><strong><font face="Cantarell">:</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="line-height: 114%; border: none; padding: 0in"><font face="Cantarell"><code class="western"><font face="Cantarell"># Create the bridge</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo ip link add name br-hotspot type bridge</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Bring the bridge up</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo ip link set br-hotspot up</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Assign a static IP to the bridge (this will be the gateway for hotspot clients and VM)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Choose a subnet not used elsewhere, e.g., 192.168.42.0/24</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo ip addr add 192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.1/24 dev br-hotspot</font></code></font></pre><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<em><font face="Cantarell">(To make </font></em><em><code class="western"><font face="Cantarell">iproute2</font></code></em><em><font face="Cantarell">
+		changes persistent, you'd typically use your distribution's network
+		configuration files, e.g., </font></em><em><code class="western"><font face="Cantarell">/etc/network/interfaces</font></code></em><em><font face="Cantarell">
+		on Debian/Ubuntu or </font></em><em><code class="western"><font face="Cantarell">/etc/sysconfig/network-scripts/</font></code></em><em><font face="Cantarell">
+		on older RHEL/Fedora, or use NetworkManager).</font></em></p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Using </font></strong><strong><code class="western"><font face="Cantarell">NetworkManager</font></code></strong><strong><font face="Cantarell">
+		(Often preferred on desktops/laptops):</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"># Add the bridge connection profile</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Configure the bridge IP address</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.1/24  # No gateway needed on the bridge itself</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Disable Spanning Tree Protocol (usually not needed for a simple setup)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo nmcli con modify br-hotspot bridge.stp no</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Bring the connection up (might already be up due to autoconnect)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo nmcli con up br-hotspot</font></code></font></pre><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<em><font face="Cantarell">Make sure </font></em><em><code class="western"><font face="Cantarell">wlan1</font></code></em><em><font face="Cantarell">
+		is not automatically managed by NetworkManager in client mode if
+		you plan to use </font></em><em><code class="western"><font face="Cantarell">hostapd</font></code></em><em><font face="Cantarell">
+		manually. You might need to tell NetworkManager to ignore it
+		(</font></em><em><code class="western"><font face="Cantarell">unmanaged-devices</font></code></em><em><font face="Cantarell">)
+		or configure it specifically for AP mode within NetworkManager.</font></em></p></li>
+	</ul>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Step
+	2: Configure the Hotspot (hostapd + dnsmasq)</font></strong></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">These
+	tools will manage the Wi-Fi AP (</font><code class="western"><font face="Cantarell">hostapd</font></code><font face="Cantarell">)
+	and provide DHCP/DNS services (</font><code class="western"><font face="Cantarell">dnsmasq</font></code><font face="Cantarell">)
+	to clients connecting to the hotspot (and the VM via the bridge).</font></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Configure </font></strong><strong><code class="western"><font face="Cantarell">hostapd</font></code></strong><strong><font face="Cantarell">:</font></strong><font face="Cantarell">
+		Create </font><code class="western"><font face="Cantarell">/etc/hostapd/hostapd.conf</font></code><font face="Cantarell">
+		(adjust path if needed).</font></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Ini, TOML</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"># Interface to use and bridge to attach it to</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">interface=wlan1</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">bridge=br-hotspot</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">driver=nl80211 # Standard Linux driver</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Basic AP settings</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">ssid=Your_5GHz_Hotspot # Choose your network name</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">hw_mode=a          # 'a' for 5GHz (802.11a/n/ac)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">channel=44         # Choose a free 5GHz channel (e.g., 36, 40, 44, 48, etc. Check 'iw list')</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">ieee80211n=1       # Enable 802.11n</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">ieee80211ac=1      # Enable 802.11ac (if card supports it)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">wmm_enabled=1      # Required for N/AC speeds</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Security (WPA2-PSK - Recommended)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">macaddr_acl=0      # Accept all MAC addresses</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">auth_algs=1        # WPA2-PSK</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">ignore_broadcast_ssid=0 # Make SSID visible</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">wpa=2</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">wpa_passphrase=YourSecurePassword # Choose a strong password (at least 8 characters)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">wpa_key_mgmt=WPA-PSK</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">rsn_pairwise=CCMP  # Use CCMP (AES) for WPA2</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># wpa_pairwise=TKIP CCMP # Avoid TKIP if possible, CCMP is more secure</font></code></font></pre>
+		<ul>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<strong><font face="Cantarell">Important:</font></strong><font face="Cantarell">
+			Ensure </font><code class="western"><font face="Cantarell">wlan1</font></code><font face="Cantarell">
+			is not being actively managed by NetworkManager or other network
+			services when </font><code class="western"><font face="Cantarell">hostapd</font></code><font face="Cantarell">
+			tries to use it. If using NetworkManager, configuring the AP mode
+			</font><em><font face="Cantarell">within</font></em><font face="Cantarell">
+			NetworkManager might be an alternative, but </font><code class="western"><font face="Cantarell">hostapd</font></code><font face="Cantarell">
+			often offers more control. </font>
+			</p></li>
+		</ul>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Configure </font></strong><strong><code class="western"><font face="Cantarell">dnsmasq</font></code></strong><strong><font face="Cantarell">:</font></strong><font face="Cantarell">
+		Create a config file, e.g., </font><code class="western"><font face="Cantarell">/etc/dnsmasq.d/hotspot.conf</font></code><font face="Cantarell">.</font></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Ini, TOML</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"># Listen only on the bridge interface</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">interface=br-hotspot</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">bind-interfaces # Important for security/correctness</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># DHCP range for clients (must be in the same subnet as the bridge IP)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Format: start_ip, end_ip, subnet_mask, lease_time</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">dhcp-range=192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.100,192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.200,255.255.255.0,12h</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Provide the bridge IP as the gateway (router)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">dhcp-option=option:router,192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.1</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Provide DNS servers (can use the host itself, or public DNS)</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">dhcp-option=option:dns-server,192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.1 # Use dnsmasq itself for DNS relay/caching</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># dhcp-option=option:dns-server,8.8.8.8,1.1.1.1 # Or use Google/Cloudflare DNS</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell"># Optional: Log DHCP actions for debugging</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># log-dhcp</font></code></font></pre></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Start and Enable Services:</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl stop systemd-resolved # Often conflicts with dnsmasq on port 53</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl disable systemd-resolved # Optional: disable permanently if using dnsmasq fully</font></code></font>
+
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl start hostapd</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl start dnsmasq</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl enable hostapd # Start on boot</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo systemctl enable dnsmasq # Start on boot</font></code></font></pre><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<em><font face="Cantarell">(Check service status with </font></em><em><code class="western"><font face="Cantarell">systemctl
+		status hostapd dnsmasq</font></code></em><em><font face="Cantarell">)</font></em></p></li>
+	</ol>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Step
+	3: Enable IP Forwarding and NAT on the Host</font></strong></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">This
+	allows devices connected to </font><code class="western"><font face="Cantarell">br-hotspot</font></code><font face="Cantarell">
+	(hotspot clients and the VM) to reach the internet via your host's
+	primary internet connection (</font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">).</font></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">O</font></strong><strong><font face="Cantarell">pen
+		the dnsmasq and dns ports in firewalld</font></strong><strong><font face="Cantarell">:</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal">#0. Create hotspot zone</span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --new-zone=hotspot</span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal"># 1. Assign bridge interface to the '</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal">hotspot</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal">' zone (if not already done) </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">hotspot</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> --add-interface=br-hotspot </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal"># 2. Allow DHCP service in the 'internal' zone </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">hotspot</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> --add-service=dhcp </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal"># 3. Allow DNS service in the 'internal' zone </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">hotspot</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> --add-service=dns </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal"># 4. Reload firewalld to apply changes </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --reload </span></i></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal"># 5. Verify (optional) </span></span></font></font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --zone=hotspot --list-all</span></i></font></font></code></font></pre></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Set up NAT (Masquerading):</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="line-height: 114%; border: none; padding: 0in"><font face="Cantarell"><code class="western"><font face="Cantarell"># This rule tells iptables to rewrite the source IP for traffic going out  wlp4s0</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell"># from the br-hotspot network, making it look like it came from the host.</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo iptables -t nat -A POSTROUTING -s 192.168.42.0/24 -o wlp4s0 -j MASQUERADE</font></code></font></pre><p class="western" style="line-height: 114%; margin-bottom: 0in; border: none; padding: 0in">
+		</p>
+		<p class="western" style="line-height: 114%; margin-bottom: 0in; border: none; padding: 0in">
+		<font face="Cantarell"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt">O</font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt">n
+		systems like Fedora Silverblue, using </font></font></code><code class="western"><font size="2" style="font-size: 10pt">iptables</font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt">
+		directly, especially via the </font></font></code><code class="western"><font size="2" style="font-size: 10pt">firewalld</font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt">
+		direct interface, is discouraged and deprecated. The goal is to
+		manage firewall rules entirely through </font></font></code><code class="western"><font size="2" style="font-size: 10pt">firewalld</font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt">'s
+		native features like zones, services, ports, and rich rules.</font></font></code></font></p></li>
+	</ol>
+	<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Liberation Mono, monospace"><code class="western"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Enable Kernel IP Forwarding (Permanent):</b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Create or modify a sysctl configuration file for persistence </b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">echo &quot;net.ipv4.ip_forward = 1&quot; | sudo tee /etc/sysctl.d/99-forwarding.conf </span></i></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Apply the setting immediately without rebooting </b></span></font></font></code></font>
+<font face="Liberation Mono, monospace"><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code></font>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	Assign Interfaces and Sources to </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>firewalld</b></span></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> Zones:</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Assign the internet interface to the 'external' zone </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0 </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Assign the hotspot bridge interface to the '</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>' zone </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> --change-interface=br-hotspot </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# (Optional</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>)</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> Explicitly assign the source subnet to '</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>' zone </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	</b></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> –add-source=192.168.42.0/24</span></i></font></font></code>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Enable Masquerading (NAT) on the External Zone:</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><span style="font-weight: normal">	</span></span></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">sudo firewall-cmd --permanent --zone=external --add-masquerade </span></i></font></font></code>
+
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>Create Policy to Allow Forwarding from </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>internal</b></span></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b> to </b></span></font></font></code><code class="western"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>external</b></span></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Create the policy object </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --new-policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Define traffic source zone (ingress) </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --add-ingress-zone=</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">internal</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal"> </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Define traffic destination zone (egress) </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --add-egress-zone=external </span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	# Set the policy action to allow the traffic </b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --permanent --policy P_</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">Internal2</span></i></font></font></code><code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">External --set-target ACCEPT</span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	</span></i></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><span style="font-style: normal"><b>	Apply All firewalld Changes</b></span></font></font></code>
+<code class="western"><font face="Cantarell"><font size="2" style="font-size: 10pt"><i><span style="font-weight: normal">	sudo firewall-cmd --reload</span></i></font></font></code>
+</pre><p class="western" style="line-height: 114%">
+	<strong><font face="Cantarell">Step 4: Configure Libvirt Network</font></strong></p>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">Now,
+	tell libvirt about the existing host bridge (</font><code class="western"><font face="Cantarell">br-hotspot</font></code><font face="Cantarell">)
+	so VMs can connect to it.</font></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Create a libvirt network XML file</font></strong><font face="Cantarell">
+		(e.g., </font><code class="western"><font face="Cantarell">hotspot-bridged.xml</font></code><font face="Cantarell">):</font></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">XML</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell">&lt;network&gt;</font></code></font>
+<code class="western">  </code><font face="Cantarell"><code class="western"><font face="Cantarell">&lt;name&gt;hotspot-bridged-net&lt;/name&gt; &lt;forward mode='bridge'/&gt;      &lt;bridge name='br-hotspot'/&gt;    &lt;/network&gt;</font></code></font></pre>
+		<ul>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<font face="Cantarell">Note: We use </font><code class="western"><font face="Cantarell">&lt;forward
+			mode='bridge'/&gt;</font></code><font face="Cantarell"> because
+			the bridge (</font><code class="western"><font face="Cantarell">br-hotspot</font></code><font face="Cantarell">)
+			already exists on the host and handles the Layer 2 connections.
+			Libvirt doesn't need to manage DHCP or IP addressing for this
+			network; </font><code class="western"><font face="Cantarell">dnsmasq</font></code><font face="Cantarell">
+			is doing that on the host bridge. </font>
+			</p></li>
+		</ul>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Define and Start the Libvirt
+		Network:</font></strong></p>
+		<p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Bash</font></p>
+		<pre class="western" style="border: none; padding: 0in; line-height: 114%"><font face="Cantarell"><code class="western"><font face="Cantarell">sudo virsh net-define hotspot-bridged.xml</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo virsh net-start hotspot-bridged-net</font></code></font>
+<font face="Cantarell"><code class="western"><font face="Cantarell">sudo virsh net-autostart hotspot-bridged-net # Make it start automatically with libvirt</font></code></font></pre></li>
+	</ol>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Step
+	5: Configure the Virtual Machine</font></strong></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Open </font><code class="western"><font face="Cantarell">virt-manager</font></code><font face="Cantarell">.
+		</font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Select your VM and go to its &quot;Hardware
+		Details&quot;. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Select the Network Interface Card (NIC). </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Under &quot;Network source&quot;, choose
+		&quot;Virtual network 'hotspot-bridged-net': Bridge host device
+		br-hotspot&quot;. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Ensure the &quot;Device model&quot; is set
+		to </font><code class="western"><font face="Cantarell">virtio</font></code><font face="Cantarell">
+		for best performance. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Apply the changes. </font>
+		</p></li>
+	</ol>
+	<p class="western" style="line-height: 114%"><strong><font face="Cantarell">Step
+	6: Start and Test</font></strong></p>
+	<ol>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Start your VM. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Inside the VM, check its IP address. It
+		should receive an IP from the </font><code class="western"><font face="Cantarell">192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.x</font></code><font face="Cantarell">
+		range via DHCP from the </font><code class="western"><font face="Cantarell">dnsmasq</font></code><font face="Cantarell">
+		service running on the host. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Connect a client device (phone, another
+		laptop) to the &quot;Your_5GHz_Hotspot&quot; Wi-Fi network you
+		created. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<font face="Cantarell">Check the client device's IP address. It
+		should also be in the </font><code class="western"><font face="Cantarell">192.168.</font></code><code class="western"><font face="Cantarell">42</font></code><code class="western"><font face="Cantarell">.x</font></code><font face="Cantarell">
+		range. </font>
+		</p></li>
+		<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+		<strong><font face="Cantarell">Test Connectivity:</font></strong><font face="Cantarell">
+		</font>
+		</p>
+		<ul>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<font face="Cantarell">Ping the VM's IP address from the hotspot
+			client. </font>
+			</p></li>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<font face="Cantarell">Ping the hotspot client's IP address from
+			the VM. </font>
+			</p></li>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<font face="Cantarell">Try accessing services running on the VM
+			(like Sunshine) from the client using the VM's IP address (e.g.,
+			</font><code class="western"><font face="Cantarell">http://&lt;VM_IP&gt;:&lt;Sunshine_Port&gt;</font></code><font face="Cantarell">).
+			No port forwarding should be needed. </font>
+			</p></li>
+			<li><p class="western" style="line-height: 114%; border: none; padding: 0in">
+			<font face="Cantarell">Verify both the VM and the hotspot client
+			can access the internet (e.g., ping </font><code class="western"><font face="Cantarell">8.8.8.8</font></code><font face="Cantarell">
+			or browse a website). </font>
+			</p></li>
+		</ul>
+	</ol>
+	<p class="western" style="line-height: 114%"><font face="Cantarell">This
+	setup creates a bridged network (</font><code class="western"><font face="Cantarell">br-hotspot</font></code><font face="Cantarell">)
+	where your VM and your hotspot clients reside on the same logical
+	network segment (192.168.42.0/24). The host routes traffic between
+	this network and the internet using its primary Wi-Fi connection
+	(</font><code class="western"><font face="Cantarell">wlan0</font></code><font face="Cantarell">)
+	via NAT. This directly fulfills the requirement for clients to
+	access any service on the VM without manual port forwarding.</font></p>
+</div>
+<p class="western"><br/>
+<br/>
+
+</p>
+<hr/>
+
+<p class="western" style="margin-bottom: 0in; line-height: 100%"><br/>
+
+</p>
+</body>
+</html>
