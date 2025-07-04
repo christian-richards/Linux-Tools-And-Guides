@@ -241,12 +241,13 @@ Log out and log in as your user (`christian`).
 1.  **Create a libvirt network** **using the following XML**:
     
     XML
-    
-    `**<network>
+    ```xml
+    <network>
       <name>hotspot-bridged-net</name> 
       <forward mode='bridge'/>
       <bridge name='br-hotspot'/>
-    </network>**` 
+    </network>
+    .```
     
 `**Add the network to your VM**` 
 
