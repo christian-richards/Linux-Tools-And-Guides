@@ -19,7 +19,7 @@ To use GPU passthrough on your Silverblue system, follow these steps:
     
 2.  Use the following command to bind the `vfio-pci` driver to your GPU. Replace the IDs with those you noted from the previous step:
     
-        rpm-ostree kargs --append-if-missing=rd.driver.pre=vfio_pci --append-if-missing=amd_iommu=on --append-if-missing=iommu=pt --append-if-missing="vfio-pci.ids=10de:2860,10de:22bd"
+        sudo rpm-ostree kargs --append-if-missing=rd.driver.pre=vfio_pci --append-if-missing=amd_iommu=on --append-if-missing=iommu=pt --append-if-missing="vfio-pci.ids=10de:2860,10de:22bd"
     
 3.  If you are using proprietary NVIDIA drivers, add the following additional parameters:
     
@@ -30,7 +30,7 @@ To use GPU passthrough on your Silverblue system, follow these steps:
 
 To ensure the VFIO driver is included in the initramfs (initial RAM filesystem), run the following:
 
-    rpm-ostree initramfs --enable --arg="--add-drivers" --arg="vfio-pci"
+    sudo rpm-ostree initramfs --enable --arg="--add-drivers" --arg="vfio-pci"
 
 ### Install VM Packages
 
@@ -44,15 +44,15 @@ If you are using an NVIDIA GPU, you may want to install proprietary NVIDIA drive
 
 1.  Add RPM Fusion repositories for both free and non-free software:
     
-        rpm-ostree install --apply-live https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+        sudo rpm-ostree install --apply-live https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
     
 2.  Update the repositories:
     
-        rpm-ostree update --uninstall rpmfusion-free-release-$(rpm -E %fedora)-1.noarch --uninstall rpmfusion-nonfree-release-$(rpm -E %fedora)-1.noarch --install rpmfusion-free-release --install rpmfusion-nonfree-release
+        sudo rpm-ostree update --uninstall rpmfusion-free-release-$(rpm -E %fedora)-1.noarch --uninstall rpmfusion-nonfree-release-$(rpm -E %fedora)-1.noarch --install rpmfusion-free-release --install rpmfusion-nonfree-release
     
 3.  Install NVIDIA-related packages:
     
-        rpm-ostree install akmod-nvidia xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda
+        sudo rpm-ostree install akmod-nvidia xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda
     
 
 #### Reboot
