@@ -36,7 +36,7 @@ To ensure the VFIO driver is included in the initramfs (initial RAM filesystem),
 
 To manage virtual machines, you'll need the following packages:
 
-    rpm-ostree install qemu-kvm-core libvirt virt-manager samba 
+    sudo rpm-ostree install qemu-kvm-core libvirt virt-manager samba dnsmasq hostapd --allow-inactive
 
 ### Install NVIDIA Drivers (Optional)
 
@@ -52,7 +52,7 @@ If you are using an NVIDIA GPU, you may want to install proprietary NVIDIA drive
     
 3.  Install NVIDIA-related packages:
     
-        rpm-ostree install akmod-nvidia xorg-x11-drv-nvidia-cuda xorg-x11-drv-nvidia-power
+        rpm-ostree install akmod-nvidia xorg-x11-drv-nvidia xorg-x11-drv-nvidia-cuda
     
 
 #### Reboot
