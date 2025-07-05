@@ -23,7 +23,7 @@ To use GPU passthrough on your Silverblue system, follow these steps:
     
 3.  If you are using proprietary NVIDIA drivers, add the following additional parameters:
     
-        --append-if-missing=video=efifb:off --append-if-missing=rd.driver.blacklist=nouveau --append-if-missing=modprobe.blacklist=nouveau --append-if-missing=nvidia-drm.modeset=1
+        --append=rd.driver.blacklist=nova_core --append=modprobe.blacklist=nova_core --append-if-missing=rd.driver.blacklist=nouveau --append-if-missing=modprobe.blacklist=nouveau --append-if-missing=nvidia-drm.modeset=1
     
 
 #### Update the Initramfs
