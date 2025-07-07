@@ -269,6 +269,9 @@ To install Flatpaks, add the Flathub repository:
 
     flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 
+#### Install GL runtimes for system
+    sudo flatpak install flathub org.freedesktop.Platform.GL.default flathub org.freedesktop.Platform.GL.nvidia-575-64 flathub org.freedesktop.Platform.GL32.default flathub org.freedesktop.Platform.GL32.nvidia-575-64 --system
+
 #### Install Firefox via Flatpak (Optional)
 
 If you don’t have Firefox installed yet, install it with the following command:
