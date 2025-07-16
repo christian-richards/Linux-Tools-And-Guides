@@ -236,7 +236,7 @@ Log out and log in as your user (`christian`).
 
 ###### Copy the hotspot script to a directory in the path to be used in the terminal
 	cd /var/mnt/DATAONE/Tools/Hotspot
-	sudo ./updatehotspot
+	./updatehotspot
 
 1.  **Create a libvirt network** **using the following XML**:
     
@@ -268,9 +268,6 @@ Log out and log in as your user (`christian`).
 To install Flatpaks, add the Flathub repository:
 
     flatpak --user remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-
-#### Install GL runtimes for system
-    sudo flatpak install flathub org.freedesktop.Platform.GL.default flathub org.freedesktop.Platform.GL.nvidia-575-64 flathub org.freedesktop.Platform.GL32.default flathub org.freedesktop.Platform.GL32.nvidia-575-64 --system
 
 #### Install Firefox via Flatpak (Optional)
 
@@ -329,11 +326,8 @@ ip a
 
 If the shared folders are inside your home directory, you need to enable SELinux rules to allow Samba to access them.
 
-`sudo setsebool -P samba_enable_home_dirs on`
-`sudo setsebool -P samba_export_all_rw=1`
-`sudo setsebool -P samba_export_all_ro=1`
-`sudo setsebool -P samba_share_fusefs=1`
-`sudo setsebool -P virt_use_samba=1`
+sudo setsebool -P samba_enable_home_dirs on && sudo setsebool -P samba_export_all_rw=1 && sudo setsebool -P samba_export_all_ro=1 && sudo setsebool -P samba_share_fusefs=1 && sudo setsebool -P virt_use_samba=1
+
 
 ### 4\. **Add Firewall Exceptions for Samba**
 
@@ -342,8 +336,7 @@ Ensure that the firewall allows Samba traffic. Add an exception for Samba servic
 1.  Add the firewall exception:
     
 
-`sudo firewall-cmd --zone=``internal` `--add-service=samba –permanent`
-`sudo firewall-cmd --zone=``libvirt` `--add-service=samba --permanent`
+sudo firewall-cmd --zone=internal --add-service=samba --permanent && sudo firewall-cmd --zone=libvirt --add-service=samba --permanent
 
 2.  Reload the firewall configuration:
     
