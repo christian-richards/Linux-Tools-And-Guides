@@ -258,6 +258,19 @@ ieee80211n=1
 ieee80211ac=1
 wmm_enabled=1
 
+# Enable 80MHz Channel Width (Essential for VR bitrate)
+vht_oper_chwidth=1
+# For Channel 157, the center frequency for an 80MHz block is 155
+vht_oper_centr_freq_seg0_idx=155
+
+# HT Capabilities (802.11n)
+# [SHORT-GI-40] increases throughput by reducing guard intervals
+ht_capab=[HT40+][SHORT-GI-40][MAX-AMSDU-7935]
+
+# VHT Capabilities (802.11ac)
+# [SHORT-GI-80] is the secret sauce for AC speeds
+vht_capab=[MAX-AMSDU-7935][SHORT-GI-80][VHT160-80]
+
 # Security (WPA2-PSK)
 macaddr_acl=0
 auth_algs=1
