@@ -216,10 +216,10 @@ Log out and log in as your user (`christian`).
 ###### Assign the hotspot bridge interface to the internal zone 
 	sudo firewall-cmd --permanent --zone=internal --change-interface=br-hotspot 
 ###### Optional: Explicitly assign the source subnet to internal zone 
-	sudo firewall-cmd --permanent --zone=internal -–add-source=192.168.42.0/24
+	sudo firewall-cmd --permanent --zone=internal --add-source=192.168.42.0/24
 
 ###### Set External Zone as Default Zone and enable services available to previous default
-	sudo firewall-cmd –set-default-zone=external
+	sudo firewall-cmd --set-default-zone=external
 	sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent
 ###### Enable Masquerading (NAT) on the External Zone:**`
 	sudo firewall-cmd --permanent --zone=external --add-masquerade 
