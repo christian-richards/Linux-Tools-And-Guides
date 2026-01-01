@@ -184,18 +184,21 @@ Log out and log in as your user (`christian`).
 #### Bring the connection up (might already be up due to autoconnect)
     sudo nmcli con up br-hotspot
     
-#### Configure firewalld to allow DHCP and DNS traffic coming in on the br-hotspot interface, destined for the dnsmasq server running locally
-##### 0. Create hotspot zone
+#### Configure firewalld to allow wivrn, DHCP and DNS traffic coming in on the br-hotspot interface, destined for the servers running locally
+##### Create hotspot zone
     sudo firewall-cmd --permanent --new-zone=internal
-##### 1. Assign bridge interface to the internal zone (if not already done)
+##### Assign bridge interface to the internal zone (if not already done)
     sudo firewall-cmd --permanent --zone=internal --add-interface=br-hotspot
-##### 2. Allow DHCP service in the 'internal' zone 
+##### Allow DHCP service in the 'internal' zone 
     sudo firewall-cmd --permanent --zone=internal --add-service=dhcp 
-##### 3. Allow DNS service in the 'internal' zone
-    sudo firewall-cmd --permanent --zone=internal --add-service=dns 
-##### 4. Reload firewalld to apply changes
+##### Allow DNS service in the 'internal' zone
+    sudo firewall-cmd --permanent --zone=internal --add-service=dns
+##### Port forwarding for wivrn in the 'internal' zone
+	sudo firewall-cmd --zone=internal --add-port=9757/tcp --permanent
+	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent
+##### Reload firewalld to apply changes
     sudo firewall-cmd --reload 
-##### 5. Verify (optional) 
+##### Verify (optional) 
     sudo firewall-cmd --zone=hotspot --list-all
     
 
