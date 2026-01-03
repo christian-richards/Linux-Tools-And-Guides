@@ -196,6 +196,13 @@ Log out and log in as your user (`christian`).
 ##### Port forwarding for wivrn in the 'internal' zone
 	sudo firewall-cmd --zone=internal --add-port=9757/tcp --permanent
 	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent
+##### Port forwarding for the 'external' zone
+######Printing Support
+	sudo firewall-cmd --zone=external --add-service=ipp --permanent
+	sudo firewall-cmd --zone=external --add-service=ipp-client --permanent
+	sudo firewall-cmd --zone=external --add-service=mdns --permanent
+	sudo firewall-cmd --zone=external --add-service=samba-client --permanent
+
 ##### Reload firewalld to apply changes
     sudo firewall-cmd --reload 
 ##### Verify (optional) 
