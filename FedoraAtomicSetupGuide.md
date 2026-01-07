@@ -98,6 +98,59 @@ Enable and mask NVIDIA services:
     
         sudo usermod -aG libvirt $USER
     
+### Increase ZRAM and create swap
+
+#### ZRAM
+Fedora stores its default settings in /usr/lib/systemd/zram-generator.conf. You should not edit this file directly. Instead, create an override file: 
+
+    sudo nano /etc/systemd/zram-generator.conf
+
+Add this to the file
+
+```
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+```
+
+Reload the daemon: 
+	
+	sudo systemctl daemon-reload
+
+Restart the zram setup: 
+
+	sudo systemctl restart systemd-zram-setup@zram0.service
+
+#### Swap
+It is recommended to place your swapfile in its own subvolume. If placed directly in the root (/) directory, it can prevent you from taking snapshots of your system.
+
+Create subvolume: 
+	
+	sudo btrfs subvolume create /var/swap
+
+Starting with modern Btrfs versions, you can use a single command to handle the complex attributes (disabling CoW and compression) required for swap. 
+
+    sudo btrfs filesystem mkswapfile --size 32G /var/swap/swapfile
+
+You can activate the swap file via
+
+	sudo swapon /var/swap/swapfile
+
+To ensure the swapfile persists after a reboot, add it to your /etc/fstab file:
+
+    sudo nano /etc/fstab
+
+Add this to your file
+```
+/var/swap/swapfile none swap defaults,pri=0 0 0
+```
+Note: Setting pri=0 (priority 0) ensures the system continues to use your faster zram first, only using the disk-based swapfile when RAM is completely exhausted. 
+
+SELinux Fixes to enable permissions for the new swap location
+
+	sudo semanage fcontext -a -t swapfile_t '/var/swap(/.*)?'
+	sudo restorecon -RF /var/swap
+	
 
 ### Auto Decrypt and Mount Disks, Replace Home Directory
 
@@ -119,6 +172,7 @@ Enable and mask NVIDIA services:
 2.  Edit the `/etc/crypttab` file to auto-decrypt at boot:
     
         echo "luks-uuid UUID=uuid /etc/uuid.key luks,nofail" >> /etc/crypttab
+I recommend installing gnome-disks / gnome-disks-utility on whatever desktop environment you are using and simply use that to set this up.
     
 
 #### Create Folders and Mount Primary Storage
@@ -198,6 +252,7 @@ Log out and log in as your user (`christian`).
 	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent
 ##### Port forwarding for the 'external' zone
 ######Printing Support
+
 	sudo firewall-cmd --zone=external --add-service=ipp --permanent
 	sudo firewall-cmd --zone=external --add-service=ipp-client --permanent
 	sudo firewall-cmd --zone=external --add-service=mdns --permanent
