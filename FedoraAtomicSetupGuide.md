@@ -123,27 +123,12 @@ Restart the zram setup:
 
 #### Swap
 It is recommended to place your swapfile in its own subvolume. If placed directly in the root (/) directory, it can prevent you from taking snapshots of your system.
-
-Create subvolume: 
 	
 	sudo btrfs subvolume create /var/swap
-
-Starting with modern Btrfs versions, you can use a single command to handle the complex attributes (disabling CoW and compression) required for swap. 
-
     sudo btrfs filesystem mkswapfile --size 32G /var/swap/swapfile
+	sudo swapon /var/swap/swapfile #activate the swap file
+    echo "/var/swap/swapfile none swap defaults,pri=0 0 0" >> /etc/fstab
 
-You can activate the swap file via
-
-	sudo swapon /var/swap/swapfile
-
-To ensure the swapfile persists after a reboot, add it to your /etc/fstab file:
-
-    sudo nano /etc/fstab
-
-Add this to your file
-```
-/var/swap/swapfile none swap defaults,pri=0 0 0
-```
 Note: Setting pri=0 (priority 0) ensures the system continues to use your faster zram first, only using the disk-based swapfile when RAM is completely exhausted. 
 
 SELinux Fixes to enable permissions for the new swap location
@@ -225,82 +210,52 @@ Test the mount:
 Log out and log in as your user (`christian`).
 
 ### Shared Hotspot And VM Network Setup
-
-#### Add the bridge connection profile
-    sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes
-    
-#### Configure the bridge IP address
-    sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.42.1/24 #No gateway needed on the bridge itself
-    
-#### Disable Spanning Tree Protocol (usually not needed for a simple setup)
-    sudo nmcli con modify br-hotspot bridge.stp no
-    
-#### Bring the connection up (might already be up due to autoconnect)
-    sudo nmcli con up br-hotspot
+    sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes #Add the bridge connection profile
+    sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.42.1/24 #Configure the bridge IP address No gateway needed on the bridge itself
+    sudo nmcli con modify br-hotspot bridge.stp no # Disable Spanning Tree Protocol (usually not needed for a simple setup)
+    sudo nmcli con up br-hotspot    
     
 #### Configure firewalld to allow wivrn, DHCP and DNS traffic coming in on the br-hotspot interface, destined for the servers running locally
-##### Create hotspot zone
     sudo firewall-cmd --permanent --new-zone=internal
-##### Assign bridge interface to the internal zone (if not already done)
+	sudo firewall-cmd --permanent --new-zone=external
     sudo firewall-cmd --permanent --zone=internal --add-interface=br-hotspot
-##### Allow DHCP service in the 'internal' zone 
     sudo firewall-cmd --permanent --zone=internal --add-service=dhcp 
-##### Allow DNS service in the 'internal' zone
     sudo firewall-cmd --permanent --zone=internal --add-service=dns
-##### Port forwarding for wivrn in the 'internal' zone
-	sudo firewall-cmd --zone=internal --add-port=9757/tcp --permanent
-	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent
-##### Port forwarding for the 'external' zone
-######Printing Support
-
-	sudo firewall-cmd --zone=external --add-service=ipp --permanent
-	sudo firewall-cmd --zone=external --add-service=ipp-client --permanent
-	sudo firewall-cmd --zone=external --add-service=mdns --permanent
-	sudo firewall-cmd --zone=external --add-service=samba-client --permanent
-
-##### Reload firewalld to apply changes
-    sudo firewall-cmd --reload 
-##### Verify (optional) 
-    sudo firewall-cmd --zone=hotspot --list-all
-    
+	sudo firewall-cmd --zone=internal --add-port=9757/tcp --permanent #wivrn
+	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent #wivrn
+	sudo firewall-cmd --zone=internal --add-port=53317/tcp --permanent #localsend
+	sudo firewall-cmd --zone=internal --add-port=53317/udp --permanent #localsend
+	sudo firewall-cmd --zone=external --add-port=53317/tcp --permanent #localsend
+	sudo firewall-cmd --zone=external --add-port=53317/udp --permanent #localsend
+	sudo firewall-cmd --zone=external --add-service=ipp --permanent #printing
+	sudo firewall-cmd --zone=external --add-service=ipp-client --permanent #printing
+	sudo firewall-cmd --zone=external --add-service=mdns --permanent #printing
+	sudo firewall-cmd --zone=external --add-service=samba-client --permanent #printing
+	sudo firewall-cmd --reload 
 
 #### Enable Internet Access On Bridge And Hotspot
 	
 ##### Enable Kernel IP Forwarding (Permanent):
-###### Create or modify a sysctl configuration file for persistence
 	echo "net.ipv4.ip_forward = 1" | sudo tee /etc/sysctl.d/99-forwarding.conf
-###### Apply the setting immediately without rebooting
-	sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # You can verify with: sysctl net.ipv4.ip_forward	
+	sudo sysctl -p /etc/sysctl.d/99-forwarding.conf # Apply the setting immediately without rebooting. You can verify with: sysctl net.ipv4.ip_forward	
 
 ##### Assign Interfaces and Sources to firewalld Zones:
-###### Assign the internet interface to the 'external' zone
-	sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0
-###### Assign the hotspot bridge interface to the internal zone 
-	sudo firewall-cmd --permanent --zone=internal --change-interface=br-hotspot 
-###### Optional: Explicitly assign the source subnet to internal zone 
-	sudo firewall-cmd --permanent --zone=internal --add-source=192.168.42.0/24
-
-###### Set External Zone as Default Zone and enable services available to previous default
+	sudo firewall-cmd --permanent --zone=external --change-interface=wlp4s0 # Assign the internet interface to the 'external' zone
+	sudo firewall-cmd --permanent --zone=internal --change-interface=br-hotspot # Assign the hotspot bridge interface to the internal zone 
+	sudo firewall-cmd --permanent --zone=internal --add-source=192.168.42.0/24 # Optional: Explicitly assign the source subnet to internal zone 
 	sudo firewall-cmd --set-default-zone=external
 	sudo firewall-cmd --zone=external --add-service=samba-client --add-service=dhcpv6-client --permanent
-###### Enable Masquerading (NAT) on the External Zone:**`
 	sudo firewall-cmd --permanent --zone=external --add-masquerade 
 
 ##### Create Policy to Allow Forwarding from internal to external
-###### Create the policy object 
 	sudo firewall-cmd --permanent --new-policy PInt2Ext 
-###### Define traffic source zone (ingress) 
-	sudo firewall-cmd --permanent --policy PInt2Ext --add-ingress-zone=internal 
-###### Define traffic destination zone (egress) 
-	sudo firewall-cmd --permanent --policy PInt2Ext --add-egress-zone=external 
-###### Set the policy action to allow the traffic 
-	sudo firewall-cmd --permanent --policy PInt2Ext --set-target ACCEPT
-	
-###### Apply All firewalld Changes
+	sudo firewall-cmd --permanent --policy PInt2Ext --add-ingress-zone=internal # Define traffic source zone (ingress) 
+	sudo firewall-cmd --permanent --policy PInt2Ext --add-egress-zone=external # Define traffic destination zone (egress) 
+	sudo firewall-cmd --permanent --policy PInt2Ext --set-target ACCEPT # Set the policy action to allow the traffic 
 	sudo firewall-cmd --reload
 
 ###### Copy the hotspot script to a directory in the path to be used in the terminal
-	cd /var/mnt/DATAONE/Tools/Hotspot
+	cd /var/mnt/DATAONE/Application/Hotspot
 	./updatehotspot
 
 1.  **Create a libvirt network** **using the following XML**:
@@ -533,51 +488,6 @@ Add the following to the `<hyperv>` section of the XML:
   <frequencies state="on"/>
 </hyperv>
 ```
-
-### Enable running Games via Network Share
-
-#### For GOG Games
-
-EnableLinkedConnections registry value enables Windows Vista, Windows 7, Windows 8, Windows 8.1, Windows 10 or later to share network connections between the filtered access token and the full administrator access token for a member of the Administrators group. After you configure this registry value, LSA checks whether there is another access token that is associated with the current user session if a network resource is mapped to an access token. If LSA determines that there is a linked access token, it adds the network share to the linked location.  
-  
-1\. Run Registry Editor (regedit).  
-2\. Navigation to the following registry key:  
-HKEY\_LOCAL\_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System  
-3\. Right click on System, then point to New, and then click DWORD (32-bit) Value.  
-4\. Type EnableLinkedConnections, and then press ENTER.  
-5\. Right-click EnableLinkedConnections, and then click Modify.  
-6\. In the Value data box, type 1, and then click OK.  
-7\. Restart the computer.
-
-#### For EA Games/Ubisoft/Etc.
-
-EA uses a Background service called "EABackgroundService" - This runs as a System service, and not the logged-in user.
-
-As the default user, creation of network files are only accessible via the user who generated the Mapping - EA's background service cannot see the mapped drive. As such we have to create it as the SYSTEM user.
-
-**Step one:** Create a BAT script with the following command
-
-`net use z:` `[\\servername\sharedfolder](//servername/sharedfolder)` `/user:username password`
-
-`**Step two:**` `Add the bat script to run at startup`
-
-*   `Open the Local Group Policy Editor.`
-    
-
-*   In the console tree, click **Scripts (Startup/Shutdown)** . The path is **Computer Configuration\\Windows Settings\\Scripts (Startup/Shutdown)** .
-    
-
-*   In the results pane, double-click **Startup** .
-    
-
-*   In the **Startup Properties** dialog box, click **Add** and select the BAT script from the previous step.
-    
-
-**Step three**: Restart the VM.
-
-**WARNING**: You can only remove this mapping the same way you created it, from the SYSTEM account. If you need to remove it, follow steps 1 and 2 but change the command to `net use z: /delete`.
-
-**NOTE**: The newly created mapped drive will now appear for ALL users of this system but they will see it displayed as "Disconnected Network Drive (Z:)". Do not let the name fool you. It may claim to be disconnected but it will work for everyone.
 
 ### Additional Tweaks
 
