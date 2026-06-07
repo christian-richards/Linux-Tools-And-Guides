@@ -1,0 +1,7 @@
+#!/bin/bash
+
+mkdir -p /usr/local/bin
+rm /usr/local/bin/devicebinder.py
+rm /usr/local/bin/devicebinder
+cp ./devicebinder.py /usr/local/bin/
+cp ./devicebinder /usr/local/bin/

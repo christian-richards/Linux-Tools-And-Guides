@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+# Exit if no argument is provided
+if [ -z "$1" ]; then
+  echo "Usage: $0 host|vm|status"
+  exit 1
+fi
+
+ARG="$1"
+
+sudo sh -c "nohup devicebinder.py \"$ARG\" >/dev/null 2>&1 &"
+
