@@ -956,7 +956,7 @@ def switch_to_vm(args, devices, config):
     log(f">>> Switching to VM Mode ({vm_driver}) <<<")
 
     preflight_checks(devices, vm_driver)
-    
+
     if ROLLBACK_FILE.exists():
         ROLLBACK_FILE.unlink()
 
@@ -965,14 +965,14 @@ def switch_to_vm(args, devices, config):
         if get_driver(dev['id']) != vm_driver:
             all_vm_bound = False
             break
-    
+
     if all_vm_bound:
         log(f"All devices already bound to {vm_driver}. Skipping setup.")
-        # If already bound, we assume we are good. 
+        # If already bound, we assume we are good.
         # But we still check single_gpu logic below.
     else:
         unique_drivers = list(set([d['driver'] for d in devices if d.get('driver')]))
-        
+
         match_strategy = config.get("module_match_strategy", "prefix")
         log(f"Analyzing module tree for roots: {unique_drivers} (strategy: {match_strategy})...")
         modules_to_unload = get_modules_to_unload(unique_drivers, match_strategy)
@@ -991,6 +991,16 @@ def switch_to_vm(args, devices, config):
 
             killed_procs = terminate_gpu_processes(unique_drivers, devices)
 
+            # Wait for all graphical processes to fully release DRM master before
+            # unbinding the GPU. This prevents stale DRM state from poisoning
+            # the next host switch.
+            log("Waiting for DRM devices to be released...")
+            for _ in range(20):
+                holders = run_command("fuser /dev/dri/card* 2>/dev/null || true", ignore_errors=True)
+                if not holders or not holders.strip():
+                    break
+                time.sleep(0.5)
+
             unbind_vt_consoles()
             detach_efi_framebuffer()
 
@@ -1004,7 +1014,7 @@ def switch_to_vm(args, devices, config):
 
             for dev in devices:
                 trigger_device_reset(dev['id'])
-                
+
             save_rollback_checkpoint("pre_module_unload", {"modules": modules_to_unload})
 
             module_params = {}
@@ -1023,22 +1033,28 @@ def switch_to_vm(args, devices, config):
             for dev in devices:
                 bind_device(dev['id'], vm_driver, args.timeout, args.retries)
 
+            # Wait for kernel device topology to stabilize after binding to VFIO.
+            # This ensures the VFIO device nodes are fully created and permissioned
+            # before the VM manager (libvirt/QEMU) attempts to open them.
+            log("Waiting for device subsystem to settle...")
+            run_command("udevadm settle --timeout=30", ignore_errors=True)
+
             log(f">>> Devices ready for VM passthrough ({vm_driver}).")
-            
+
             if ROLLBACK_FILE.exists():
                 ROLLBACK_FILE.unlink()
 
         except Exception as e:
             log(f"CRITICAL ERROR during VM switch: {e}", "error")
             log("Attempting rollback...", "warning")
-            
+
             if execute_rollback():
                 log("Rollback completed. System should be in previous state.", "warning")
             else:
                 log("Rollback failed. Manual recovery required.", "error")
                 bind_vt_consoles()
                 run_command("systemctl isolate graphical.target", ignore_errors=True)
-            
+
             sys.exit(1)
 
     # FIX #4: Single GPU Passthrough Logic
