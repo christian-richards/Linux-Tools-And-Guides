@@ -208,10 +208,134 @@ acquire_lock() {
 
 release_lock() {
   if [[ -n "${LOCK_ACQUIRED}" && -n "${LOCK_FD}" ]]; then
+    allow_driver_autoload # Ensure blocklist NEVER leaks on early abort/failure
     flock -u "$LOCK_FD" 2>/dev/null || true
     exec {LOCK_FD}>&- 2>/dev/null || true
     LOCK_ACQUIRED=""
   fi
+}
+
+# ============================================================================
+# Kernel module dependency graph
+# ============================================================================
+
+normalize_module_name() {
+  printf '%s' "${1//-/_}"
+}
+
+module_holders() {
+  local mod; mod="$(normalize_module_name "$1")"
+  local dir="${SYSFS_MODULE}/${mod}/holders"
+  [[ -d "$dir" ]] || return 0
+  local h
+  for h in "$dir"/*; do
+    [[ -e "$h" ]] || continue
+    basename "$h"
+  done
+}
+
+# Recursively resolves all modules that depend on the given base module
+get_all_holders() {
+  local mod; mod="$(normalize_module_name "$1")"
+  echo "$mod"
+  local holder
+  while IFS= read -r holder; do
+    [[ -n "$holder" ]] && get_all_holders "$holder"
+  done < <(module_holders "$mod")
+}
+
+is_module_loaded() {
+  local mod; mod="$(normalize_module_name "$1")"
+  [[ -d "${SYSFS_MODULE}/${mod}" ]]
+}
+
+unload_module_tree() {
+  local mod; mod="$(normalize_module_name "$1")"
+  if [[ "${VISITED_MODULES[$mod]:-}" == "1" ]]; then
+    return 0
+  fi
+  VISITED_MODULES["$mod"]=1
+
+  local holder
+  while IFS= read -r holder; do
+    [[ -z "$holder" ]] && continue
+    unload_module_tree "$holder"
+  done < <(module_holders "$mod")
+
+  is_module_loaded "$mod" || return 0
+
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "[DRY-RUN] Would remove kernel module: $mod"
+    return 0
+  fi
+
+  log_info "Removing kernel module: $mod"
+
+  local tries=0
+  local removed=0
+  while (( tries < 10 )); do
+    if modprobe -r "$mod" 2>>"${LOG_FILE}"; then
+      removed=1
+      break
+    elif rmmod "$mod" 2>>"${LOG_FILE}"; then
+      removed=1
+      log_debug "Removed '$mod' via rmmod fallback."
+      break
+    fi
+    sleep 0.5
+    tries=$((tries+1))
+  done
+
+  if (( removed == 1 )); then
+    REMOVED_MODULES+=("$mod")
+  else
+    log_warn "Could not remove module '$mod' (still in use?). Continuing without full unload for this module tree; the per-device sysfs unbind should still let vfio-pci claim the device."
+  fi
+}
+
+other_devices_using_driver() {
+  local driver="$1"
+  local d addr is_target t drv
+  for d in "${SYSFS_PCI}"/devices/*; do
+    [[ -e "$d" ]] || continue
+    addr="$(basename "$d")"
+    is_target=0
+    for t in "${TARGET_DEVICES[@]}"; do
+      if [[ "$t" == "$addr" ]]; then
+        is_target=1
+        break
+      fi
+    done
+    if (( is_target == 1 )); then
+      continue
+    fi
+    drv="$(pci_driver_of "$addr")"
+    if [[ "$drv" == "$driver" ]]; then
+      log_debug "Driver '$driver' is also used by $addr (outside the managed device set)."
+      return 0
+    fi
+  done
+  return 1
+}
+
+reload_removed_modules() {
+  if (( ${#REMOVED_MODULES[@]} == 0 )); then
+    log_debug "No previously-removed modules recorded; relying on modalias-based auto-detection instead."
+    return 0
+  fi
+  local i mod
+  for (( i=${#REMOVED_MODULES[@]}-1; i>=0; i-- )); do
+    mod="${REMOVED_MODULES[$i]}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+      log_info "[DRY-RUN] Would run: modprobe $mod"
+      continue
+    fi
+    log_info "Reloading kernel module: $mod"
+    modprobe "$mod" 2>>"${LOG_FILE}" \
+      || log_warn "Failed to reload module '$mod' by name (it may have been renamed/removed by a package update); relying on modalias-based detection instead."
+  done
+  [[ "$DRY_RUN" == "true" ]] && return 0
+  journal_push "reload_modules"
 }
 
 # ============================================================================
@@ -225,16 +349,20 @@ prevent_driver_autoload() {
   fi
   mkdir -p "/run/modprobe.d" 2>/dev/null || true
   > "$MODPROBE_BLOCK_FILE"
-  local d
+
+  local d h
+  local -A to_block=()
   for d in "${drivers[@]}"; do
-    echo "install $d /bin/false" >> "$MODPROBE_BLOCK_FILE"
-    if [[ "$d" == "nvidia" ]]; then
-      echo "install nvidia_drm /bin/false" >> "$MODPROBE_BLOCK_FILE"
-      echo "install nvidia_modeset /bin/false" >> "$MODPROBE_BLOCK_FILE"
-      echo "install nvidia_uvm /bin/false" >> "$MODPROBE_BLOCK_FILE"
-    fi
+    # Autodetect and block all dependent modules (e.g. nvidia_drm, amdgpu_core, etc)
+    while IFS= read -r h; do
+      [[ -n "$h" ]] && to_block["$h"]=1
+    done < <(get_all_holders "$d")
   done
-  log_debug "Created modprobe blocklist to prevent rogue reloads: ${drivers[*]}"
+
+  for d in "${!to_block[@]}"; do
+    echo "install $d /bin/false" >> "$MODPROBE_BLOCK_FILE"
+  done
+  log_debug "Created modprobe blocklist to prevent rogue reloads: ${!to_block[*]}"
 }
 
 allow_driver_autoload() {
@@ -371,10 +499,6 @@ require_iommu() {
 # PCI / sysfs helpers
 # ============================================================================
 
-normalize_module_name() {
-  printf '%s' "${1//-/_}"
-}
-
 pci_driver_of() {
   local addr="$1"
   local link="${SYSFS_PCI}/devices/${addr}/driver"
@@ -429,115 +553,6 @@ build_target_devices() {
     abort "No target devices resolved from GPU_PCI_IDS; check your config."
   fi
   log_debug "Target devices (after IOMMU group expansion): ${TARGET_DEVICES[*]}"
-}
-
-# ============================================================================
-# Kernel module dependency graph
-# ============================================================================
-
-module_holders() {
-  local mod; mod="$(normalize_module_name "$1")"
-  local dir="${SYSFS_MODULE}/${mod}/holders"
-  [[ -d "$dir" ]] || return 0
-  local h
-  for h in "$dir"/*; do
-    [[ -e "$h" ]] || continue
-    basename "$h"
-  done
-}
-
-is_module_loaded() {
-  local mod; mod="$(normalize_module_name "$1")"
-  [[ -d "${SYSFS_MODULE}/${mod}" ]]
-}
-
-unload_module_tree() {
-  local mod; mod="$(normalize_module_name "$1")"
-  if [[ "${VISITED_MODULES[$mod]:-}" == "1" ]]; then
-    return 0
-  fi
-  VISITED_MODULES["$mod"]=1
-
-  local holder
-  while IFS= read -r holder; do
-    [[ -z "$holder" ]] && continue
-    unload_module_tree "$holder"
-  done < <(module_holders "$mod")
-
-  is_module_loaded "$mod" || return 0
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would remove kernel module: $mod"
-    return 0
-  fi
-
-  log_info "Removing kernel module: $mod"
-
-  local tries=0
-  local removed=0
-  while (( tries < 10 )); do
-    if modprobe -r "$mod" 2>>"${LOG_FILE}"; then
-      removed=1
-      break
-    elif rmmod "$mod" 2>>"${LOG_FILE}"; then
-      removed=1
-      log_debug "Removed '$mod' via rmmod fallback."
-      break
-    fi
-    sleep 0.5
-    tries=$((tries+1))
-  done
-
-  if (( removed == 1 )); then
-    REMOVED_MODULES+=("$mod")
-  else
-    log_warn "Could not remove module '$mod' (still in use?). Continuing without full unload for this module tree; the per-device sysfs unbind should still let vfio-pci claim the device."
-  fi
-}
-
-other_devices_using_driver() {
-  local driver="$1"
-  local d addr is_target t drv
-  for d in "${SYSFS_PCI}"/devices/*; do
-    [[ -e "$d" ]] || continue
-    addr="$(basename "$d")"
-    is_target=0
-    for t in "${TARGET_DEVICES[@]}"; do
-      if [[ "$t" == "$addr" ]]; then
-        is_target=1
-        break
-      fi
-    done
-    if (( is_target == 1 )); then
-      continue
-    fi
-    drv="$(pci_driver_of "$addr")"
-    if [[ "$drv" == "$driver" ]]; then
-      log_debug "Driver '$driver' is also used by $addr (outside the managed device set)."
-      return 0
-    fi
-  done
-  return 1
-}
-
-reload_removed_modules() {
-  if (( ${#REMOVED_MODULES[@]} == 0 )); then
-    log_debug "No previously-removed modules recorded; relying on modalias-based auto-detection instead."
-    return 0
-  fi
-  local i mod
-  for (( i=${#REMOVED_MODULES[@]}-1; i>=0; i-- )); do
-    mod="${REMOVED_MODULES[$i]}"
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would run: modprobe $mod"
-      continue
-    fi
-    log_info "Reloading kernel module: $mod"
-    modprobe "$mod" 2>>"${LOG_FILE}" \
-      || log_warn "Failed to reload module '$mod' by name (it may have been renamed/removed by a package update); relying on modalias-based detection instead."
-  done
-  [[ "$DRY_RUN" == "true" ]] && return 0
-  journal_push "reload_modules"
 }
 
 ensure_driver_loaded_for_device() {
@@ -939,6 +954,8 @@ journal_push() {
 }
 
 rollback_from_journal() {
+  # Drop blocklist BEFORE rolling back, otherwise reload_removed_modules fails
+  allow_driver_autoload
   local i entry
   for (( i=${#JOURNAL[@]}-1; i>=0; i-- )); do
     entry="${JOURNAL[$i]}"
@@ -946,7 +963,6 @@ rollback_from_journal() {
     rollback_one "$entry"
   done
   log_warn "Rollback finished. Please verify GPU/display state manually. Full detail in: $LOG_FILE"
-  allow_driver_autoload
   JOURNAL=()
   persist_state
 }
@@ -1189,7 +1205,7 @@ do_bind() {
     [[ -n "$d" ]] && seen_driver["$d"]=1
   done
 
-  # Lock down modprobe so restarting greeters don't reload nvidia_drm while we unload it
+  # Lock down modprobe dynamically so restarting greeters don't reload components while we unload them
   prevent_driver_autoload "${!seen_driver[@]}"
 
   ensure_vfio_pci_loaded
