@@ -33,6 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 : "${SYSFS_MODULE:=/sys/module}"
 : "${SYSFS_IOMMU_GROUPS:=/sys/kernel/iommu_groups}"
 : "${SYSFS_PLATFORM:=/sys/bus/platform}"
+: "${SYSFS_CLASS:=/sys/class}"
 : "${SYSFS_VTCONSOLE:=/sys/class/vtconsole}"
 : "${DEV_DIR:=/dev}"
 
@@ -70,6 +71,7 @@ declare -a JOURNAL=()
 declare -A ORIG_DRIVER=()
 declare -a REMOVED_MODULES=()
 declare -a RELEASED_VTCONSOLES=()
+declare -a STOPPED_SERVICES=()
 declare -A VISITED_MODULES=()
 DM_WAS_ACTIVE=""
 DM_UNIT=""
@@ -79,7 +81,6 @@ declare -a TARGET_DEVICES=()
 declare -a RESTORE_DEVICES=()
 
 CONFIG_PATH=""
-DRY_RUN="false"
 VERBOSE="false"
 COMMAND=""
 ROLLING_BACK="0"
@@ -97,7 +98,7 @@ _log() {
   local msg="$*"
   local ts
   ts="$(date '+%Y-%m-%d %H:%M:%S%z' 2>/dev/null || date)"
-  local line="[$ts] [$level] [pid:$$] $msg"
+  local line="[$ts] [pid:$$] [$level] $msg"
   if [[ -n "${LOG_FILE:-}" ]]; then
     printf '%s\n' "$line" >> "$LOG_FILE" 2>/dev/null || true
     circular_trim_log
@@ -143,7 +144,7 @@ setup_logging() {
   if [[ "$VERBOSE" == "true" ]]; then
     LOG_LEVEL="DEBUG"
   fi
-  log_info "===== $SCRIPT_NAME starting: command='$COMMAND' dry_run=$DRY_RUN pid=$$ ====="
+  log_info "===== $SCRIPT_NAME starting: command='$COMMAND' pid=$$ ====="
 }
 
 # ============================================================================
@@ -192,6 +193,26 @@ on_error_trap() {
 }
 trap 'on_error_trap "$LINENO" "$BASH_COMMAND" "$?"' ERR
 
+on_signal_trap() {
+  local sig="$1"
+  # Suspend signal/error traps to prevent recursion while rolling back
+  trap '' INT TERM HUP ERR
+  log_error "Caught signal $sig! Terminating."
+  maybe_rollback
+  release_lock
+
+  local exit_code=1
+  case "$sig" in
+    INT)  exit_code=130 ;;
+    HUP)  exit_code=129 ;;
+    TERM) exit_code=143 ;;
+  esac
+  exit "$exit_code"
+}
+trap 'on_signal_trap INT'  INT
+trap 'on_signal_trap TERM' TERM
+trap 'on_signal_trap HUP'  HUP
+
 # ============================================================================
 # Locking
 # ============================================================================
@@ -234,14 +255,21 @@ module_holders() {
   done
 }
 
-# Recursively resolves all modules that depend on the given base module
-get_all_holders() {
-  local mod; mod="$(normalize_module_name "$1")"
+_get_all_holders_recurse() {
+  local mod="$1"
+  [[ "${_GAH_VISITED[$mod]:-}" == "1" ]] && return 0
+  _GAH_VISITED["$mod"]=1
   echo "$mod"
   local holder
   while IFS= read -r holder; do
-    [[ -n "$holder" ]] && get_all_holders "$holder"
+    [[ -n "$holder" ]] && _get_all_holders_recurse "$holder"
   done < <(module_holders "$mod")
+}
+
+# Recursively resolves all modules that depend on the given base module
+get_all_holders() {
+  local -A _GAH_VISITED=()
+  _get_all_holders_recurse "$(normalize_module_name "$1")"
 }
 
 is_module_loaded() {
@@ -264,27 +292,15 @@ unload_module_tree() {
 
   is_module_loaded "$mod" || return 0
 
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would remove kernel module: $mod"
-    return 0
-  fi
-
   log_info "Removing kernel module: $mod"
 
-  local tries=0
   local removed=0
-  while (( tries < 10 )); do
-    if modprobe -r "$mod" 2>>"${LOG_FILE}"; then
-      removed=1
-      break
-    elif rmmod "$mod" 2>>"${LOG_FILE}"; then
-      removed=1
-      log_debug "Removed '$mod' via rmmod fallback."
-      break
-    fi
-    sleep 0.5
-    tries=$((tries+1))
-  done
+  if modprobe -r "$mod" 2>>"${LOG_FILE}"; then
+    removed=1
+  elif rmmod "$mod" 2>>"${LOG_FILE}"; then
+    removed=1
+    log_debug "Removed '$mod' via rmmod fallback."
+  fi
 
   if (( removed == 1 )); then
     REMOVED_MODULES+=("$mod")
@@ -326,15 +342,10 @@ reload_removed_modules() {
   local i mod
   for (( i=${#REMOVED_MODULES[@]}-1; i>=0; i-- )); do
     mod="${REMOVED_MODULES[$i]}"
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would run: modprobe $mod"
-      continue
-    fi
     log_info "Reloading kernel module: $mod"
     modprobe "$mod" 2>>"${LOG_FILE}" \
       || log_warn "Failed to reload module '$mod' by name (it may have been renamed/removed by a package update); relying on modalias-based detection instead."
   done
-  [[ "$DRY_RUN" == "true" ]] && return 0
   journal_push "reload_modules"
 }
 
@@ -360,7 +371,7 @@ prevent_driver_autoload() {
   done
 
   for d in "${!to_block[@]}"; do
-    echo "install $d /bin/false" >> "$MODPROBE_BLOCK_FILE"
+    printf 'install %s /bin/false\n' "$d" >> "$MODPROBE_BLOCK_FILE"
   done
   log_debug "Created modprobe blocklist to prevent rogue reloads: ${!to_block[*]}"
 }
@@ -471,7 +482,7 @@ require_config() {
 }
 
 check_dependencies() {
-  local -a required=(lspci systemctl modprobe rmmod fuser flock stat readlink awk sort ps date mkdir cat basename dirname mv rm chmod uname kill)
+  local -a required=(lspci systemctl modprobe rmmod fuser flock stat readlink awk sort ps date mkdir cat basename dirname mv rm chmod uname kill grep tail)
   local -a missing=()
   local c
   for c in "${required[@]}"; do
@@ -561,10 +572,6 @@ ensure_driver_loaded_for_device() {
   [[ -r "$modalias_file" ]] || return 0
   local hw_alias; hw_alias="$(cat "$modalias_file" 2>/dev/null || true)"
   [[ -n "$hw_alias" ]] || return 0
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would run: modprobe $hw_alias   (auto-load driver for $addr by hardware ID)"
-    return 0
-  fi
   modprobe "$hw_alias" 2>>"${LOG_FILE}" \
     || log_debug "modprobe by modalias found nothing new for $addr (driver may already be loaded, or none installed)."
 }
@@ -572,10 +579,6 @@ ensure_driver_loaded_for_device() {
 ensure_vfio_pci_loaded() {
   if is_module_loaded "vfio-pci"; then
     log_debug "vfio-pci module already loaded."
-    return 0
-  fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would modprobe vfio-pci."
     return 0
   fi
   log_info "Loading vfio-pci module."
@@ -589,20 +592,33 @@ ensure_vfio_pci_loaded() {
 
 release_boot_framebuffer() {
   [[ "$RELEASE_BOOT_FRAMEBUFFER" == "true" ]] || return 0
-  local fb drv_link drvname
-  for fb in efi-framebuffer.0 vesa-framebuffer.0 vesafb.0 simple-framebuffer.0 simpledrm.0; do
-    drv_link="${SYSFS_PLATFORM}/devices/${fb}/driver"
-    if [[ -e "$drv_link" ]]; then
-      drvname="$(basename "$(readlink -f "$drv_link")")"
-      if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would unbind boot framebuffer $fb from $drvname."
-        continue
-      fi
-      log_info "Releasing boot framebuffer device '$fb' (driver '$drvname') so the real GPU driver can unbind cleanly."
-      if echo "$fb" > "${SYSFS_PLATFORM}/drivers/${drvname}/unbind" 2>>"${LOG_FILE}"; then
-        journal_push "unbind_platform|${fb}|${drvname}"
-      else
-        log_warn "Could not unbind boot framebuffer '$fb'; this is often harmless, continuing."
+  local dev_link drv_link drvname devname class_dir
+  local -A unbound_fb=()
+
+  # Dynamically search sysfs graphics instances for any matching platform drivers
+  for class_dir in "${SYSFS_CLASS}"/graphics/fb* "${SYSFS_CLASS}"/drm/card*; do
+    [[ -e "$class_dir" ]] || continue
+    dev_link="${class_dir}/device"
+    if [[ -e "$dev_link" ]]; then
+      devname="$(basename "$(readlink -f "$dev_link")")"
+      drv_link="${dev_link}/driver"
+
+      if [[ -e "$drv_link" ]]; then
+        drvname="$(basename "$(readlink -f "$drv_link")")"
+        if [[ "${unbound_fb[$devname]:-}" == "1" ]]; then
+          continue
+        fi
+
+        # Only detach framebuffers sitting on the "platform" bus so we don't accidentally knock offline a real PCIe GPU
+        if [[ "$(readlink -f "${dev_link}/subsystem" 2>/dev/null || true)" == *"/bus/platform" ]]; then
+          unbound_fb["$devname"]=1
+          log_info "Releasing boot framebuffer platform device '$devname' (driver '$drvname') so the real GPU driver can unbind cleanly."
+          if printf '%s\n' "$devname" > "${drv_link}/unbind" 2>>"${LOG_FILE}"; then
+            journal_push "unbind_platform|${devname}|${drvname}"
+          else
+            log_warn "Could not unbind boot framebuffer '$devname'; this is often harmless, continuing."
+          fi
+        fi
       fi
     fi
   done
@@ -623,12 +639,8 @@ release_vt_consoles() {
       log_debug "VT console $vc is already unbound."
       continue
     fi
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would unbind VT console $vc."
-      continue
-    fi
     log_info "Unbinding VT console $vc to ensure the GPU is released."
-    if echo 0 > "$path/bind" 2>>"${LOG_FILE}"; then
+    if printf '0\n' > "$path/bind" 2>>"${LOG_FILE}"; then
       RELEASED_VTCONSOLES+=("$vc")
       journal_push "unbind_vtconsole|${vc}"
       persist_state
@@ -648,13 +660,12 @@ restore_vt_consoles() {
   for vc in "${RELEASED_VTCONSOLES[@]}"; do
     path="${SYSFS_VTCONSOLE}/${vc}"
     [[ -e "$path/bind" ]] || continue
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would rebind VT console $vc."
-      continue
-    fi
     log_info "Rebinding VT console $vc."
-    echo 1 > "$path/bind" 2>>"${LOG_FILE}" \
-      || log_warn "Could not rebind VT console $vc; you may need to do it manually: echo 1 > ${path}/bind"
+    if printf '1\n' > "$path/bind" 2>>"${LOG_FILE}"; then
+      journal_push "rebind_vtconsole|${vc}"
+    else
+      log_warn "Could not rebind VT console $vc; you may need to do it manually: printf 1 > ${path}/bind"
+    fi
   done
 }
 
@@ -678,13 +689,8 @@ attempt_function_level_reset() {
     return 0
   fi
 
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would perform a function-level reset on $addr."
-    return 0
-  fi
-
   log_info "Performing a function-level reset on $addr."
-  if echo 1 > "$reset_file" 2>>"${LOG_FILE}"; then
+  if printf '1\n' > "$reset_file" 2>>"${LOG_FILE}"; then
     log_debug "Reset succeeded for $addr."
   else
     log_warn "Reset failed or unsupported for $addr; continuing without it (this is usually harmless)."
@@ -719,9 +725,19 @@ find_pids_using_devices() {
   if (( ${#nodes[@]} == 0 )); then
     return 0
   fi
-  local raw
-  raw="$(fuser "${nodes[@]}" 2>/dev/null || true)"
-  printf '%s' "$raw" | tr -s ' \t' '\n' | grep -E '^[0-9]+$' | sort -un || true
+
+  local raw1="" raw2=""
+
+  # Utilize lsof to locate mmap-only mappings that omit open FDs
+  if command -v lsof >/dev/null 2>&1; then
+    raw1="$(lsof -t "${nodes[@]}" 2>/dev/null || true)"
+  fi
+
+  # Fallback to standard fuser
+  raw2="$(fuser "${nodes[@]}" 2>/dev/null || true)"
+
+  # printf '%s\n' applies the format uniformly to each argument, ensuring clean newlines before sorting
+  printf '%s\n' "$raw1" "$raw2" | tr -s ' \t' '\n' | grep -E '^[0-9]+$' | sort -un || true
 }
 
 terminate_pids_safely() {
@@ -730,40 +746,92 @@ terminate_pids_safely() {
     return 0
   fi
 
-  local pid comm cmdline
+  local pid comm cmdline svc
   local -a to_wait=()
+  local -A services_to_stop=()
+
   for pid in "${pids[@]}"; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     if (( pid == $$ )) || (( pid == 1 )); then
       log_warn "Refusing to signal PID $pid (this script or PID 1)."
       continue
     fi
+
+    # Dynamically extract and catalog systemd services operating off the GPU
+    if [[ -r "/proc/$pid/cgroup" ]]; then
+      # Extract the most specific (deepest) .service unit from the cgroup path
+      svc="$(grep -Eo '[^/]+\.service' "/proc/$pid/cgroup" 2>/dev/null | tail -n1 || true)"
+      if [[ -n "$svc" && "$svc" != "${DM_UNIT:-}" && "$svc" != "display-manager.service" && "$svc" != user@*.service ]]; then
+        local load_state="" slice=""
+        if command -v systemctl >/dev/null 2>&1; then
+          load_state="$(systemctl show -p LoadState --value "$svc" 2>/dev/null || true)"
+          slice="$(systemctl show -p Slice --value "$svc" 2>/dev/null || true)"
+        fi
+
+        # Only target loaded system services (actively ignores user session units)
+        if [[ "$load_state" == "loaded" && "$slice" != "user.slice" ]]; then
+          services_to_stop["$svc"]=1
+        fi
+      fi
+    fi
+  done
+
+  # Safely stop dynamically discovered vendor services (nvidia-persistenced, docker, ollama, etc)
+  for svc in "${!services_to_stop[@]}"; do
+    log_info "Stopping dynamically detected system service using the GPU: $svc"
+    systemctl stop "$svc" 2>>"${LOG_FILE}" || log_warn "Failed to stop service $svc"
+    STOPPED_SERVICES+=("$svc")
+    journal_push "stop_service|${svc}"
+  done
+
+  if [[ ${#services_to_stop[@]} -gt 0 ]]; then
+    sleep 1
+  fi
+
+  # Re-evaluate processes as stopping the services will already reap dependent daemon PIDs
+  local -a remaining_pids=()
+  for pid in "${pids[@]}"; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      if (( pid != $$ )) && (( pid != 1 )); then
+        remaining_pids+=("$pid")
+      fi
+    fi
+  done
+
+  if (( ${#remaining_pids[@]} == 0 )); then
+    return 0
+  fi
+
+  local -A pid_starts=()
+  for pid in "${remaining_pids[@]}"; do
+    pid_starts["$pid"]="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+  done
+
+  for pid in "${remaining_pids[@]}"; do
     comm="$(ps -o comm= -p "$pid" 2>/dev/null || echo unknown)"
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
     [[ -z "$cmdline" ]] && cmdline="$comm"
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would send SIGTERM to PID $pid ($comm): $cmdline"
-      continue
-    fi
     log_info "Sending SIGTERM to PID $pid ($comm): $cmdline"
     journal_push "killed_pid|${pid}|${comm}"
     kill -TERM "$pid" 2>/dev/null || true
     to_wait+=("$pid")
   done
 
-  if [[ "$DRY_RUN" == "true" ]]; then
-    return 0
-  fi
   if (( ${#to_wait[@]} == 0 )); then
     return 0
   fi
 
   local waited=0
   local -a still=()
+  local cur_start
   while (( waited < PROCESS_KILL_GRACE_PERIOD )); do
     still=()
     for pid in "${to_wait[@]}"; do
-      kill -0 "$pid" 2>/dev/null && still+=("$pid")
+      cur_start="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+      if [[ -n "$cur_start" && "$cur_start" == "${pid_starts[$pid]}" ]]; then
+        still+=("$pid")
+      fi
     done
     if (( ${#still[@]} == 0 )); then
       break
@@ -775,7 +843,10 @@ terminate_pids_safely() {
 
   still=()
   for pid in "${to_wait[@]}"; do
-    kill -0 "$pid" 2>/dev/null && still+=("$pid")
+    cur_start="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
+    if [[ -n "$cur_start" && "$cur_start" == "${pid_starts[$pid]}" ]]; then
+      still+=("$pid")
+    fi
   done
   if (( ${#still[@]} > 0 )); then
     for pid in "${still[@]}"; do
@@ -784,6 +855,19 @@ terminate_pids_safely() {
     done
     sleep 1
   fi
+}
+
+restart_stopped_services() {
+  if (( ${#STOPPED_SERVICES[@]} == 0 )); then
+    return 0
+  fi
+  local i svc
+  for (( i=${#STOPPED_SERVICES[@]}-1; i>=0; i-- )); do
+    svc="${STOPPED_SERVICES[$i]}"
+    log_info "Restarting vendor service: $svc"
+    systemctl start "$svc" 2>>"${LOG_FILE}" || log_warn "Failed to restart service $svc"
+    journal_push "start_service|$svc"
+  done
 }
 
 # ============================================================================
@@ -827,12 +911,8 @@ terminate_graphical_sessions() {
     class="$(loginctl show-session -p Class --value "$sid" 2>/dev/null || true)"
 
     if [[ "$class" == "user" || "$class" == "greeter" ]]; then
-      if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY-RUN] Would terminate local logind session $sid (class=$class)."
-      else
-        log_info "Terminating active local logind session $sid (class=$class)..."
-        loginctl terminate-session "$sid" 2>>"${LOG_FILE}" || true
-      fi
+      log_info "Terminating active local logind session $sid (class=$class)..."
+      loginctl terminate-session "$sid" 2>>"${LOG_FILE}" || true
     fi
   done
 }
@@ -848,14 +928,10 @@ stop_display_manager() {
   elif is_unit_active "$unit"; then
     DM_WAS_ACTIVE="true"
     persist_state
-    if [[ "$DRY_RUN" == "true" ]]; then
-      log_info "[DRY-RUN] Would stop display manager: $unit"
-    else
-      log_info "Stopping display manager: $unit"
-      systemctl stop "$unit" 2>>"${LOG_FILE}" || abort "Failed to stop display manager unit '$unit'."
-      journal_push "stop_dm"
-      sleep 1
-    fi
+    log_info "Stopping display manager: $unit"
+    systemctl stop "$unit" 2>>"${LOG_FILE}" || abort "Failed to stop display manager unit '$unit'."
+    journal_push "stop_dm"
+    sleep 1
   else
     log_info "Display manager '$unit' is already inactive; nothing to stop."
     DM_WAS_ACTIVE="false"
@@ -863,7 +939,7 @@ stop_display_manager() {
   fi
 
   terminate_graphical_sessions
-  [[ "$DRY_RUN" != "true" ]] && sleep 1
+  sleep 1
 }
 
 start_display_manager() {
@@ -873,10 +949,6 @@ start_display_manager() {
   fi
   if [[ -z "$unit" ]]; then
     log_info "No display-manager.service alias configured; nothing to start."
-    return 0
-  fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would start display manager: $unit"
     return 0
   fi
   log_info "Starting display manager: $unit"
@@ -894,8 +966,37 @@ persist_state() {
   if {
     printf '# vfio-toggle state file - auto-generated, do not hand-edit\n'
     printf '# Last written: %s\n' "$(date -Iseconds 2>/dev/null || date)"
-    declare -p JOURNAL ORIG_DRIVER REMOVED_MODULES RELEASED_VTCONSOLES DM_WAS_ACTIVE DM_UNIT STATE_OPERATION \
-      | sed -E 's/^declare [^ ]+ //'
+
+    # Natively serialize structures into bare assignments using %q safety escapes.
+    # Because these variables are pre-declared as global arrays/associative arrays at the top of the script,
+    # sourcing these bare assignments securely overwrites the global structures without relying on declare -p output hacks.
+
+    local k v
+
+    printf 'JOURNAL=( '
+    for v in "${JOURNAL[@]}"; do printf '%q ' "$v"; done
+    printf ')\n'
+
+    printf 'ORIG_DRIVER=( '
+    for k in "${!ORIG_DRIVER[@]}"; do printf '[%q]=%q ' "$k" "${ORIG_DRIVER[$k]}"; done
+    printf ')\n'
+
+    printf 'REMOVED_MODULES=( '
+    for v in "${REMOVED_MODULES[@]}"; do printf '%q ' "$v"; done
+    printf ')\n'
+
+    printf 'RELEASED_VTCONSOLES=( '
+    for v in "${RELEASED_VTCONSOLES[@]}"; do printf '%q ' "$v"; done
+    printf ')\n'
+
+    printf 'STOPPED_SERVICES=( '
+    for v in "${STOPPED_SERVICES[@]}"; do printf '%q ' "$v"; done
+    printf ')\n'
+
+    printf 'DM_WAS_ACTIVE=%q\n' "$DM_WAS_ACTIVE"
+    printf 'DM_UNIT=%q\n' "$DM_UNIT"
+    printf 'STATE_OPERATION=%q\n' "$STATE_OPERATION"
+
   } > "${STATE_FILE}.tmp" 2>/dev/null; then
     if mv -f "${STATE_FILE}.tmp" "$STATE_FILE" 2>/dev/null; then
       chmod 600 "$STATE_FILE" 2>/dev/null || true
@@ -910,6 +1011,7 @@ persist_state() {
 
 load_state() {
   if [[ -f "$STATE_FILE" ]]; then
+    assert_safe_to_source "$STATE_FILE"
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     return 0
@@ -923,6 +1025,7 @@ clear_state() {
   ORIG_DRIVER=()
   REMOVED_MODULES=()
   RELEASED_VTCONSOLES=()
+  STOPPED_SERVICES=()
   DM_WAS_ACTIVE=""
   DM_UNIT=""
   STATE_OPERATION=""
@@ -979,10 +1082,20 @@ rollback_one() {
     killed_pid)
       log_warn "  (PID from '$entry' was already terminated and cannot be un-killed.)"
       ;;
+    stop_service)
+      if [[ -n "$rest" ]]; then
+        systemctl start "$rest" 2>>"${LOG_FILE}" || log_warn "  Failed to restart service $rest."
+        log_info "  Restarted service $rest."
+      fi
+      ;;
+    start_service)
+      systemctl stop "$rest" 2>>"${LOG_FILE}" || true
+      ;;
     unbind_driver)
       addr="${rest%%|*}"
       drv="${rest#*|}"
-      echo "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
+      clear_driver_override "$addr"
+      printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
       log_info "  Re-probed $addr (original driver was '$drv')."
       ;;
     remove_modules)
@@ -994,7 +1107,7 @@ rollback_one() {
       ;;
     bind_vfio)
       if [[ -e "${SYSFS_PCI}/devices/${rest}/driver" ]]; then
-        echo "$rest" > "${SYSFS_PCI}/devices/${rest}/driver/unbind" 2>>"${LOG_FILE}" || true
+        printf '%s\n' "$rest" > "${SYSFS_PCI}/devices/${rest}/driver/unbind" 2>>"${LOG_FILE}" || true
       fi
       log_info "  Unbound $rest from vfio-pci."
       ;;
@@ -1002,29 +1115,44 @@ rollback_one() {
       log_debug "  (override_cleared for $rest needs no rollback action by itself.)"
       ;;
     unbind_vfio)
-      echo "vfio-pci" > "${SYSFS_PCI}/devices/${rest}/driver_override" 2>>"${LOG_FILE}" || true
-      echo "$rest" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
+      printf 'vfio-pci\n' > "${SYSFS_PCI}/devices/${rest}/driver_override" 2>>"${LOG_FILE}" || true
+      printf '%s\n' "$rest" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
       log_info "  Re-bound $rest back to vfio-pci."
       ;;
     reload_modules)
-      log_debug "  (reload_modules already represents a completed step; no action needed.)"
+      # When restoring to host drivers (unbind) fails, rolling back implies reverting to vfio-pci.
+      # Leaving the host modules loaded in memory is harmless as long as the device itself is re-bound to vfio-pci.
+      log_debug "  (reload_modules rollback: leaving restored host modules loaded is safe; no action needed.)"
       ;;
     rebind_driver)
-      log_debug "  ($entry already represents a completed rebind; no action needed.)"
+      addr="${rest%%|*}"
+      drv="${rest#*|}"
+      log_info "  Rolling back host driver rebind for $addr (was '$drv'). Re-binding to vfio-pci."
+      if [[ -e "${SYSFS_PCI}/devices/${addr}/driver" ]]; then
+        printf '%s\n' "$addr" > "${SYSFS_PCI}/devices/${addr}/driver/unbind" 2>>"${LOG_FILE}" || true
+      fi
+      printf 'vfio-pci\n' > "${SYSFS_PCI}/devices/${addr}/driver_override" 2>>"${LOG_FILE}" || true
+      printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
       ;;
     unbind_platform)
       fb="${rest%%|*}"
       dn="${rest#*|}"
-      echo "$fb" > "${SYSFS_PLATFORM}/drivers/${dn}/bind" 2>>"${LOG_FILE}" || log_warn "  Could not rebind platform device $fb."
+      printf '%s\n' "$fb" > "${SYSFS_PLATFORM}/drivers/${dn}/bind" 2>>"${LOG_FILE}" || log_warn "  Could not rebind platform device $fb."
       ;;
     unbind_vtconsole)
       if [[ -e "${SYSFS_VTCONSOLE}/${rest}/bind" ]]; then
-        echo 1 > "${SYSFS_VTCONSOLE}/${rest}/bind" 2>>"${LOG_FILE}" || log_warn "  Could not rebind VT console $rest."
+        printf '1\n' > "${SYSFS_VTCONSOLE}/${rest}/bind" 2>>"${LOG_FILE}" || log_warn "  Could not rebind VT console $rest."
       fi
       log_info "  Rebound VT console $rest."
       ;;
+    rebind_vtconsole)
+      if [[ -e "${SYSFS_VTCONSOLE}/${rest}/bind" ]]; then
+        printf '0\n' > "${SYSFS_VTCONSOLE}/${rest}/bind" 2>>"${LOG_FILE}" || log_warn "  Could not unbind VT console $rest."
+      fi
+      log_info "  Re-unbound VT console $rest."
+      ;;
     start_dm_after_bind|start_dm_after_unbind)
-      log_debug "  ($entry already represents a completed step; no action needed.)"
+      stop_display_manager
       ;;
     *)
       log_warn "  Unknown journal entry type '$type' (from '$entry'); skipping."
@@ -1041,12 +1169,8 @@ set_driver_override() {
   local driver="$2"
   local f="${SYSFS_PCI}/devices/${addr}/driver_override"
   [[ -e "$f" ]] || abort "driver_override attribute not found for $addr."
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would set driver_override=$driver for $addr."
-    return 0
-  fi
   log_info "Setting driver_override=$driver for $addr."
-  echo "$driver" > "$f" || abort "Failed to set driver_override=$driver for $addr."
+  printf '%s\n' "$driver" > "$f" || abort "Failed to set driver_override=$driver for $addr."
   journal_push "override_set|${addr}"
 }
 
@@ -1054,7 +1178,7 @@ clear_driver_override() {
   local addr="$1"
   local f="${SYSFS_PCI}/devices/${addr}/driver_override"
   [[ -e "$f" ]] || return 0
-  echo "" > "$f" 2>>"${LOG_FILE}" || log_warn "Could not clear driver_override for $addr."
+  printf '\n' > "$f" 2>>"${LOG_FILE}" || log_warn "Could not clear driver_override for $addr."
 }
 
 unbind_device_from_driver() {
@@ -1064,12 +1188,8 @@ unbind_device_from_driver() {
     log_debug "$addr has no driver currently bound; nothing to unbind."
     return 0
   fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would unbind $addr from driver '$drv'."
-    return 0
-  fi
   log_info "Unbinding $addr from driver '$drv'."
-  echo "$addr" > "${SYSFS_PCI}/devices/${addr}/driver/unbind" 2>>"${LOG_FILE}" \
+  printf '%s\n' "$addr" > "${SYSFS_PCI}/devices/${addr}/driver/unbind" 2>>"${LOG_FILE}" \
     || abort "Failed to unbind $addr from '$drv'. It may still be in use; check the process list above and 'dmesg'."
   journal_push "unbind_driver|${addr}|${drv}"
 }
@@ -1081,15 +1201,6 @@ bind_device_to_vfio() {
     log_debug "$addr is already bound to vfio-pci."
     return 0
   fi
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would set driver_override=vfio-pci and bind $addr."
-    return 0
-  fi
-
-  if [[ -n "$cur" ]]; then
-    log_warn "$addr is currently bound to '$cur'; unbinding before binding to vfio-pci."
-    unbind_device_from_driver "$addr"
-  fi
 
   local override_file="${SYSFS_PCI}/devices/${addr}/driver_override"
   local current_override=""
@@ -1098,13 +1209,18 @@ bind_device_to_vfio() {
     set_driver_override "$addr" "vfio-pci"
   fi
 
-  echo "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
+  if [[ -n "$cur" ]]; then
+    log_warn "$addr is currently bound to '$cur'; unbinding before binding to vfio-pci."
+    unbind_device_from_driver "$addr"
+  fi
+
+  printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
   sleep 0.3
   cur="$(pci_driver_of "$addr")"
 
   if [[ "$cur" != "vfio-pci" ]]; then
     log_warn "$addr did not bind via drivers_probe (current: '${cur:-none}'); trying a direct bind."
-    echo "$addr" > "${SYSFS_PCI}/drivers/vfio-pci/bind" 2>>"${LOG_FILE}" || true
+    printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers/vfio-pci/bind" 2>>"${LOG_FILE}" || true
     sleep 0.3
     cur="$(pci_driver_of "$addr")"
   fi
@@ -1118,14 +1234,10 @@ bind_device_to_vfio() {
 
 unbind_device_from_vfio() {
   local addr="$1"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would clear driver_override and unbind $addr from vfio-pci."
-    return 0
-  fi
   clear_driver_override "$addr"
   journal_push "override_cleared|${addr}"
   if [[ -e "${SYSFS_PCI}/devices/${addr}/driver" ]]; then
-    echo "$addr" > "${SYSFS_PCI}/devices/${addr}/driver/unbind" 2>>"${LOG_FILE}" \
+    printf '%s\n' "$addr" > "${SYSFS_PCI}/devices/${addr}/driver/unbind" 2>>"${LOG_FILE}" \
       || abort "Failed to unbind $addr from vfio-pci."
     journal_push "unbind_vfio|${addr}"
   fi
@@ -1135,16 +1247,12 @@ unbind_device_from_vfio() {
 rebind_original_driver() {
   local addr="$1"
   local expected="${ORIG_DRIVER[$addr]:-}"
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_info "[DRY-RUN] Would probe $addr to rebind to '${expected:-auto-detected driver}'."
-    return 0
-  fi
-  echo "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
+  printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
   sleep 0.3
   local cur; cur="$(pci_driver_of "$addr")"
   if [[ -z "$cur" && -n "$expected" && -d "${SYSFS_PCI}/drivers/${expected}" ]]; then
     log_warn "$addr did not bind via drivers_probe (current: '${cur:-none}'); trying direct bind to '$expected'."
-    echo "$addr" > "${SYSFS_PCI}/drivers/${expected}/bind" 2>>"${LOG_FILE}" || true
+    printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers/${expected}/bind" 2>>"${LOG_FILE}" || true
     sleep 0.3
     cur="$(pci_driver_of "$addr")"
   fi
@@ -1249,6 +1357,20 @@ do_bind() {
   release_vt_consoles
   release_boot_framebuffer
 
+  # Force standard unbind of the device first to detach its internals. This drops driver references,
+  # destroys rogue/orphaned CUDA or graphical contexts, and cleanly permits future module unloading.
+  for addr in "${need_action[@]}"; do
+    set_driver_override "$addr" "vfio-pci"
+    unbind_device_from_driver "$addr"
+  done
+
+  # Give kernel/udev a moment to process the unbind uevents and release transient refs
+  if command -v udevadm >/dev/null 2>&1; then
+    log_info "Waiting for udev to process device teardown events..."
+    udevadm settle
+  fi
+
+  # Now properly safe to un-root module trees
   if [[ "$ALLOW_FULL_MODULE_UNLOAD" == "true" ]]; then
     seen_driver=()
     for addr in "${need_action[@]}"; do
@@ -1271,11 +1393,6 @@ do_bind() {
   fi
 
   for addr in "${need_action[@]}"; do
-    unbind_device_from_driver "$addr"
-    set_driver_override "$addr" "vfio-pci"
-  done
-
-  for addr in "${need_action[@]}"; do
     attempt_function_level_reset "$addr"
   done
 
@@ -1283,12 +1400,10 @@ do_bind() {
     bind_device_to_vfio "$addr"
   done
 
-  if [[ "$DRY_RUN" != "true" ]]; then
-    for addr in "${TARGET_DEVICES[@]}"; do
-      cur="$(pci_driver_of "$addr")"
-      [[ "$cur" == "vfio-pci" ]] || abort "Post-check failed: $addr is bound to '${cur:-none}', expected vfio-pci."
-    done
-  fi
+  for addr in "${TARGET_DEVICES[@]}"; do
+    cur="$(pci_driver_of "$addr")"
+    [[ "$cur" == "vfio-pci" ]] || abort "Post-check failed: $addr is bound to '${cur:-none}', expected vfio-pci."
+  done
 
   if [[ "$RESTART_DISPLAY_MANAGER_AFTER_BIND" == "true" && "${DM_WAS_ACTIVE:-false}" == "true" ]]; then
     log_info "Restarting the display manager while the GPU is on vfio-pci (RESTART_DISPLAY_MANAGER_AFTER_BIND=true). If the host has no secondary GPU to fall back to, this may not produce a usable display — see RELEASE_VT_CONSOLE / README for single-GPU setups."
@@ -1320,6 +1435,10 @@ do_unbind() {
   else
     log_warn "No saved state file found; proceeding in best-effort mode (will rely on modalias-based driver detection)."
   fi
+
+  # Clear stale journal from previous partial run before beginning unbind
+  JOURNAL=()
+  persist_state
 
   local addr cur
   local -a need_action=()
@@ -1360,14 +1479,13 @@ do_unbind() {
     rebind_original_driver "$addr"
   done
 
-  if [[ "$DRY_RUN" != "true" ]]; then
-    for addr in "${TARGET_DEVICES[@]}"; do
-      cur="$(pci_driver_of "$addr")"
-      [[ -n "$cur" ]] || abort "Post-check failed: $addr has no driver bound after restore."
-    done
-  fi
+  for addr in "${TARGET_DEVICES[@]}"; do
+    cur="$(pci_driver_of "$addr")"
+    [[ -n "$cur" ]] || abort "Post-check failed: $addr has no driver bound after restore."
+  done
 
   restore_vt_consoles
+  restart_stopped_services
 
   start_display_manager
   journal_push "start_dm_after_unbind"
@@ -1422,6 +1540,9 @@ do_status() {
     fi
     if (( ${#RELEASED_VTCONSOLES[@]} > 0 )); then
       echo "  VT consoles previously released: ${RELEASED_VTCONSOLES[*]}"
+    fi
+    if (( ${#STOPPED_SERVICES[@]} > 0 )); then
+      echo "  Vendor daemon services stopped: ${STOPPED_SERVICES[*]}"
     fi
   else
     echo "No saved state file (clean state)."
@@ -1503,7 +1624,6 @@ Commands:
 
 Options:
   -c, --config PATH   Use PATH instead of the default config file.
-  -n, --dry-run       Print what would be done without changing anything.
   -v, --verbose       Verbose console output (DEBUG level).
   -h, --help          Show this help.
 
@@ -1527,7 +1647,6 @@ main() {
       -c|--config)
         [[ $# -ge 2 ]] || { echo "Error: --config requires a path." >&2; exit 1; }
         CONFIG_PATH="$2"; shift 2 ;;
-      -n|--dry-run) DRY_RUN="true"; shift ;;
       -v|--verbose) VERBOSE="true"; shift ;;
       -h|--help) usage; exit 0 ;;
       *) echo "Unknown option: $1" >&2; usage; exit 1 ;;

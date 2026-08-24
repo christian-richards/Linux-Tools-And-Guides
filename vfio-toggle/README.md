@@ -32,8 +32,11 @@ vfio-toggle.sh avoids all of that:
 | Which functions need to move together | Every configured address is expanded to its full **IOMMU group** via `/sys/.../iommu_group`, so the GPU's HDMI audio / USB-C controller functions always travel with it. |
 | Which kernel modules to remove, and in what order | Read live from `/sys/module/*/holders` (the kernel's own reverse-dependency graph) and removed deepest-dependent-first, recursively. Works for any driver stack, not just Nvidia's. |
 | Reloading the right driver afterward | The device's own `modalias` sysfs file is used to ask the kernel what currently claims that hardware ID, in addition to replaying the exact modules that were removed, in reverse order. Correct even if the state file is lost or a driver package was updated in between. |
-| Desktop environment / display manager | The standard systemd alias `display-manager.service` — whichever DM is enabled symlinks itself onto it — so this works identically under GNOME/GDM, KDE/SDDM, XFCE/LightDM, or anything else, with no per-DE logic. |
-| Killing processes safely | SIGTERM, wait for a configurable grace period, SIGKILL only if still alive. Never signals PID 1 or itself. |
+| Desktop environment / display manager | The standard systemd alias `display-manager.service` — whichever DM is enabled symlinks itself onto it — so this works identically under GNOME/GDM, KDE/SDDM, XFCE/LightDM, or anything else, with no per-DE logic. `loginctl` is also used to terminate any lingering user/greeter sessions. |
+| Stopping vendor daemon services | Processes holding the GPU are inspected via cgroups to discover systemd services (e.g., `nvidia-persistenced`, Docker, Ollama) that own the device; they are stopped automatically before the GPU is unbound and restarted afterward. |
+| Killing processes safely | SIGTERM, wait for a configurable grace period, SIGKILL only if still alive. PIDs are tracked by start-time (`ps -o lstart=`) to avoid PID-reuse races, and the scan retries up to 3 times to catch respawning display servers. Never signals PID 1 or itself. |
+| Preventing drivers from reloading mid-operation | A temporary modprobe blocklist (`/run/modprobe.d/vfio-toggle-block.conf`) is created while modules are being unloaded and removed as soon as the operation finishes or rolls back. |
+| Concurrent execution | A lock file (`/run/vfio-toggle.lock`) prevents two instances from running at the same time. |
 | Errors partway through | Every destructive step is journaled and persisted to disk *as it happens*; a failure replays the journal in reverse and undoes exactly what was done, in the correct order. |
 | Config safety | The config is `source`d as root, so the script refuses to load it unless it's root-owned and not group/other-writable. |
 
@@ -45,6 +48,9 @@ vfio-toggle.sh avoids all of that:
 - `pciutils`, `kmod`, `util-linux`, `psmisc`, `coreutils` (all normally
   present by default; `vfio-toggle.sh bind`/`unbind` will tell you exactly
   what's missing if not).
+- Optional but recommended: `lsof` (more thorough detection of mmap-only
+  GPU users), `loginctl` (session teardown), and `udevadm` (event
+  settling).
 - Root access.
 
 ## Install
@@ -60,9 +66,6 @@ sudo vfio-toggle.sh list-devices
 
 # Edit GPU_PCI_IDS (and anything else you want to change):
 sudo nano /etc/vfio-toggle/vfio-toggle.conf
-
-# Dry-run first, so nothing actually changes yet:
-sudo vfio-toggle.sh bind --dry-run -v
 ```
 
 ## Usage
@@ -71,7 +74,7 @@ sudo vfio-toggle.sh bind --dry-run -v
 vfio-toggle.sh <command> [options]
 
 Commands:
-  bind            Unbind the configured GPU (and its IOMMU group) from its
+  bind            Unbind the configured GPU (and its whole IOMMU group) from its
                   current driver and bind it to vfio-pci.
   unbind          Reverse of 'bind': unbind from vfio-pci and restore the
                   original driver(s).
@@ -84,7 +87,6 @@ Commands:
 
 Options:
   -c, --config PATH   Use PATH instead of the default config file.
-  -n, --dry-run       Print what would be done without changing anything.
   -v, --verbose       Verbose console output (DEBUG level).
   -h, --help          Show this help.
 ```
@@ -127,37 +129,66 @@ fi
 ## Configuration
 
 See the comments in `vfio-toggle.conf.example` for the full list of
-options (GPU addresses, whether to restart the display manager, whether to
-fully unload kernel modules, process-kill grace period, log/state/lock
-file locations, log verbosity). Any option you omit falls back to the
-script's built-in default.
+options. Any option you omit falls back to the script's built-in default.
+Key options include:
+
+- `GPU_PCI_IDS` — the PCI address(es) of the GPU(s) to manage.
+- `RESTART_DISPLAY_MANAGER_AFTER_BIND` — whether to restart the DM after
+  the GPU is moved to vfio-pci (only useful if the host has a secondary
+  GPU; default `true`).
+- `ALLOW_FULL_MODULE_UNLOAD` — whether to fully remove the original driver
+  module stack or only unbind the device (default `true`).
+- `RELEASE_BOOT_FRAMEBUFFER` — attempt to unbind firmware framebuffers
+  (`efifb`, `vesafb`, `simplefb`) so the host GPU driver can release
+  cleanly (default `true`).
+- `RELEASE_VT_CONSOLE` — unbind VT consoles before unbinding the GPU
+  (default `true`).
+- `ALLOW_FUNCTION_LEVEL_RESET` — perform a PCI function-level reset on
+  each device after unbinding and before rebinding (default `true`).
+- `PROCESS_KILL_GRACE_PERIOD` — seconds to wait between SIGTERM and
+  SIGKILL (default `10`).
+- `AUTO_ROLLBACK` — automatically undo journaled steps if a later step
+  fails (default `true`).
+- `LOG_FILE`, `STATE_FILE`, `LOCK_FILE` — paths for the log, state, and
+  lock files.
+- `LOG_MAX_BYTES` — circular log size cap (default 1 MiB).
+- `LOG_LEVEL` — console verbosity: `DEBUG`, `INFO`, `WARN`, or `ERROR`
+  (default `INFO`).
 
 ## Logs, state, and rollback
 
 - **Log**: everything is logged in detail to `LOG_FILE` (default
   `/var/log/vfio-toggle.log`) regardless of console verbosity, so if
   something fails you can always find exactly which step it was on. It's
-  timestamped and includes captured command output. Use `-v` for a more
-  verbose console too, or set `LOG_LEVEL=DEBUG` permanently in the config.
+  timestamped and includes captured command output. The log is a circular
+  buffer capped at `LOG_MAX_BYTES` — oldest lines are dropped in place as
+  new ones are written. Use `-v` for a more verbose console too, or set
+  `LOG_LEVEL=DEBUG` permanently in the config.
 - **State**: `STATE_FILE` (default `/var/lib/vfio-toggle/state`) records
-  which driver each device came from, which modules were removed, and
-  whether the display manager was running — written the moment each fact
-  is known, not just at the end. `unbind` reads it back to know what to
-  restore. `status` shows a summary of it.
+  which driver each device came from, which modules were removed, which
+  VT consoles were released, which services were stopped, and whether the
+  display manager was running — written the moment each fact is known,
+  not just at the end. `unbind` reads it back to know what to restore.
+  `status` shows a summary of it. State is serialized with bash `%q`
+  quoting so it round-trips safely across separate invocations.
 - **Rollback**: every destructive action is journaled as it happens. If a
   later step fails, the journal is replayed in reverse automatically
-  (unless you set `AUTO_ROLLBACK=false`), undoing exactly what was done.
-  You can also trigger this manually at any time with
-  `vfio-toggle.sh rollback`, which is useful if a run was killed outright
-  (e.g. `kill -9`, power loss) before it could roll back on its own.
+  (unless you set `AUTO_ROLLBACK=false`), undoing exactly what was done,
+  in the correct order. The temporary modprobe blocklist and lock file
+  are also cleaned up during rollback. You can trigger this manually at
+  any time with `vfio-toggle.sh rollback`, which is useful if a run was
+  killed outright (e.g. `kill -9`, power loss) before it could roll back
+  on its own.
 
 ## Troubleshooting
 
 - **`bind` fails at "did not bind via drivers_probe"**: check
   `dmesg | tail -50` for the underlying kernel-side reason. Common causes:
   another process still has a device file open (rare, since processes are
-  killed before this point — check `LOG_FILE` for what was found), or the
-  device is genuinely unable to reset (rare on modern hardware).
+  killed and services stopped before this point — check `LOG_FILE` for
+  what was found), or the device is genuinely unable to reset (rare on
+  modern hardware). The script automatically falls back to a direct sysfs
+  bind if `drivers_probe` fails.
 - **Display doesn't come back after `unbind`**: check
   `vfio-toggle.sh status` — it shows the current driver per device and
   whether the display manager is active. If a device shows no driver at
