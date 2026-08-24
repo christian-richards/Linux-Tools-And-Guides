@@ -1,31 +1,5 @@
 # vfio-toggle
 
-A robust, dynamic script to bind/unbind a GPU (and its whole IOMMU group)
-to/from `vfio-pci`, for VFIO/KVM GPU passthrough — including single-GPU
-passthrough, where the same card is shared between the host and a VM at
-different times.
-
-It's meant to be the thing you call from a keyboard shortcut, a systemd
-service, or a libvirt hook right before starting the VM (`bind`) and right
-after it shuts down (`unbind`).
-
-## Why this exists / what makes it "robust"
-
-Most GPU-passthrough toggle scripts floating around forums hardcode a
-vendor's module names, a specific desktop environment's process names, and
-use `options vfio-pci ids=10de:xxxx,10de:yyyy` in `modprobe.d` to grab the
-card at boot. That approach has real problems:
-
-- It can't tell two identical GPUs apart — `ids=` grabs *every* device with
-  that vendor:device ID, system-wide.
-- It hardcodes a driver's module stack (`nvidia_drm`, `nvidia_uvm`, ...),
-  which changes between driver versions and doesn't work for AMD/Intel.
-- It assumes a specific display manager or desktop environment.
-- If it fails partway through, you're left with a half-unbound GPU, no
-  display, and no idea what state you're in.
-
-vfio-toggle.sh avoids all of that:
-
 | Concern | How it's handled |
 |---|---|
 | Binding a specific device, not "every device like it" | `driver_override` + `drivers_probe` per PCI address, the documented sysfs mechanism — not `new_id`/`remove_id`/`ids=`. Safe with two identical GPUs. |
