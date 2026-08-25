@@ -14,8 +14,8 @@
 #   - Journal every destructive step as it happens and persist it to disk,
 #     so a failure partway through can be rolled back automatically.
 #
-# Usage: vfio-toggle.sh <bind|unbind|status|list-devices|rollback> [opts]
-# Run with --help for details. Must be run as root (except status/list-devices).
+# Usage: vfio-toggle.sh <bind|unbind|status|list-devices|rollback|show-log|clear-log> [opts]
+# Run with --help for details. Must be run as root (except status/list-devices/show-log).
 #
 set -Eeuo pipefail
 shopt -s nullglob
@@ -277,6 +277,11 @@ is_module_loaded() {
   [[ -d "${SYSFS_MODULE}/${mod}" ]]
 }
 
+is_module_builtin() {
+  local mod; mod="$(normalize_module_name "$1")"
+  [[ -d "${SYSFS_MODULE}/${mod}" && ! -e "${SYSFS_MODULE}/${mod}/initstate" ]]
+}
+
 unload_module_tree() {
   local mod; mod="$(normalize_module_name "$1")"
   if [[ "${VISITED_MODULES[$mod]:-}" == "1" ]]; then
@@ -290,14 +295,19 @@ unload_module_tree() {
     unload_module_tree "$holder"
   done < <(module_holders "$mod")
 
+  if is_module_builtin "$mod"; then
+    log_info "Module '$mod' is built into the kernel; skipping unload."
+    return 0
+  fi
+
   is_module_loaded "$mod" || return 0
 
   log_info "Removing kernel module: $mod"
 
   local removed=0
-  if modprobe -r "$mod" 2>>"${LOG_FILE}"; then
+  if timeout 15 modprobe -r "$mod" 2>>"${LOG_FILE}"; then
     removed=1
-  elif rmmod "$mod" 2>>"${LOG_FILE}"; then
+  elif timeout 15 rmmod "$mod" 2>>"${LOG_FILE}"; then
     removed=1
     log_debug "Removed '$mod' via rmmod fallback."
   fi
@@ -311,25 +321,28 @@ unload_module_tree() {
 
 other_devices_using_driver() {
   local driver="$1"
-  local d addr is_target t drv
-  for d in "${SYSFS_PCI}"/devices/*; do
-    [[ -e "$d" ]] || continue
-    addr="$(basename "$d")"
-    is_target=0
-    for t in "${TARGET_DEVICES[@]}"; do
-      if [[ "$t" == "$addr" ]]; then
-        is_target=1
-        break
+  local bus driver_dir dev_link addr is_target t
+  for bus in /sys/bus/*; do
+    driver_dir="${bus}/drivers/${driver}"
+    [[ -d "$driver_dir" ]] || continue
+    for dev_link in "${driver_dir}/"*; do
+      [[ -L "$dev_link" ]] || continue
+      addr="$(basename "$dev_link")"
+      [[ "$addr" == "module" ]] && continue
+
+      is_target=0
+      for t in "${TARGET_DEVICES[@]}"; do
+        if [[ "$t" == "$addr" ]]; then
+          is_target=1
+          break
+        fi
+      done
+
+      if (( is_target == 0 )); then
+        log_debug "Driver '$driver' is also used by '$addr' on bus $(basename "$bus") (outside the managed device set)."
+        return 0
       fi
     done
-    if (( is_target == 1 )); then
-      continue
-    fi
-    drv="$(pci_driver_of "$addr")"
-    if [[ "$drv" == "$driver" ]]; then
-      log_debug "Driver '$driver' is also used by $addr (outside the managed device set)."
-      return 0
-    fi
   done
   return 1
 }
@@ -343,7 +356,7 @@ reload_removed_modules() {
   for (( i=${#REMOVED_MODULES[@]}-1; i>=0; i-- )); do
     mod="${REMOVED_MODULES[$i]}"
     log_info "Reloading kernel module: $mod"
-    modprobe "$mod" 2>>"${LOG_FILE}" \
+    timeout 15 modprobe "$mod" 2>>"${LOG_FILE}" \
       || log_warn "Failed to reload module '$mod' by name (it may have been renamed/removed by a package update); relying on modalias-based detection instead."
   done
   journal_push "reload_modules"
@@ -482,7 +495,7 @@ require_config() {
 }
 
 check_dependencies() {
-  local -a required=(lspci systemctl modprobe rmmod fuser flock stat readlink awk sort ps date mkdir cat basename dirname mv rm chmod uname kill grep tail)
+  local -a required=(lspci systemctl modprobe rmmod fuser flock stat readlink awk sort ps date mkdir cat basename dirname mv rm chmod uname kill grep tail lsof timeout)
   local -a missing=()
   local c
   for c in "${required[@]}"; do
@@ -572,7 +585,7 @@ ensure_driver_loaded_for_device() {
   [[ -r "$modalias_file" ]] || return 0
   local hw_alias; hw_alias="$(cat "$modalias_file" 2>/dev/null || true)"
   [[ -n "$hw_alias" ]] || return 0
-  modprobe "$hw_alias" 2>>"${LOG_FILE}" \
+  timeout 15 modprobe "$hw_alias" 2>>"${LOG_FILE}" \
     || log_debug "modprobe by modalias found nothing new for $addr (driver may already be loaded, or none installed)."
 }
 
@@ -582,7 +595,7 @@ ensure_vfio_pci_loaded() {
     return 0
   fi
   log_info "Loading vfio-pci module."
-  modprobe vfio-pci 2>>"${LOG_FILE}" \
+  timeout 15 modprobe vfio-pci 2>>"${LOG_FILE}" \
     || abort "Failed to load the vfio-pci kernel module. Is it available for your running kernel ($(uname -r))? Check: modinfo vfio-pci"
 }
 
@@ -703,20 +716,28 @@ attempt_function_level_reset() {
 
 device_nodes_for() {
   local addr="$1"
-  local drm_dir="${SYSFS_PCI}/devices/${addr}/drm"
+  local dev_dir="${SYSFS_PCI}/devices/${addr}"
   local entry name
-  if [[ -d "$drm_dir" ]]; then
-    for entry in "$drm_dir"/*; do
+
+  if [[ -d "${dev_dir}/drm" ]]; then
+    for entry in "${dev_dir}/drm"/*; do
       [[ -e "$entry" ]] || continue
       name="$(basename "$entry")"
       [[ -e "${DEV_DIR}/dri/${name}" ]] && printf '%s\n' "${DEV_DIR}/dri/${name}"
     done
   fi
-  if [[ "$(pci_driver_of "$addr")" == "nvidia" ]]; then
+
+  local drv
+  drv="$(pci_driver_of "$addr")"
+  if [[ "$drv" == "nvidia" ]]; then
     local n
     for n in "${DEV_DIR}"/nvidia*; do
       [[ -e "$n" ]] && printf '%s\n' "$n"
     done
+  fi
+
+  if [[ "$drv" == "amdgpu" || "$drv" == "amdkfd" ]]; then
+    [[ -e "${DEV_DIR}/kfd" ]] && printf '%s\n' "${DEV_DIR}/kfd"
   fi
 }
 
@@ -1328,6 +1349,33 @@ do_bind() {
   done
 
   if (( ${#nodes[@]} > 0 )); then
+    log_info "Waiting up to 10 seconds for DRM master release..."
+    local max_iters=50
+    local iter=0
+    local -a active_pids=()
+    while (( iter < max_iters )); do
+      active_pids=()
+      while IFS= read -r p; do
+        [[ -n "$p" ]] && active_pids+=("$p")
+      done < <(find_pids_using_devices "${nodes[@]}")
+
+      if (( ${#active_pids[@]} == 0 )); then
+        break
+      fi
+      sleep 0.2
+      iter=$((iter+1))
+    done
+
+    if (( ${#active_pids[@]} == 0 )); then
+      if (( iter > 0 )); then
+        log_info "DRM master released by graceful exit."
+      else
+        log_info "No processes are currently using the GPU device nodes."
+      fi
+    else
+      log_debug "Processes still holding DRM nodes after wait: ${active_pids[*]}"
+    fi
+
     local tries=0
     # Try up to 3 times to account for a display manager eagerly respawning Wayland/X11
     while (( tries < 3 )); do
@@ -1337,15 +1385,13 @@ do_bind() {
       done < <(find_pids_using_devices "${nodes[@]}")
 
       if (( ${#pids[@]} == 0 )); then
-        if (( tries == 0 )); then
-          log_info "No processes are currently using the GPU device nodes."
-        else
+        if (( tries > 0 )); then
           log_info "No more processes found using GPU device nodes."
         fi
         break
       fi
 
-      log_info "Checking for processes using GPU device nodes (attempt $((tries+1))): ${pids[*]}"
+      log_info "Checking for processes using GPU device nodes (kill attempt $((tries+1))): ${pids[*]}"
       terminate_pids_safely "${pids[@]}"
       tries=$((tries+1))
       sleep 1
@@ -1357,6 +1403,11 @@ do_bind() {
   release_vt_consoles
   release_boot_framebuffer
 
+  if command -v loginctl >/dev/null 2>&1; then
+    log_info "Flushing logind device references..."
+    loginctl flush-devices 2>>"${LOG_FILE}" || true
+  fi
+
   # Force standard unbind of the device first to detach its internals. This drops driver references,
   # destroys rogue/orphaned CUDA or graphical contexts, and cleanly permits future module unloading.
   for addr in "${need_action[@]}"; do
@@ -1367,7 +1418,7 @@ do_bind() {
   # Give kernel/udev a moment to process the unbind uevents and release transient refs
   if command -v udevadm >/dev/null 2>&1; then
     log_info "Waiting for udev to process device teardown events..."
-    udevadm settle
+    udevadm settle --timeout=15 || log_warn "udevadm settle timed out"
   fi
 
   # Now properly safe to un-root module trees
@@ -1379,7 +1430,7 @@ do_bind() {
       [[ "${seen_driver[$d]:-}" == "1" ]] && continue
       seen_driver["$d"]=1
       if other_devices_using_driver "$d"; then
-        log_info "Skipping full unload of module '$d': still in use by another PCI device outside the managed set."
+        log_info "Skipping full unload of module '$d': still in use by another device outside the managed set."
       else
         unload_module_tree "$d"
       fi
@@ -1621,6 +1672,8 @@ Commands:
                   to help you fill in the config file.
   rollback        Manually replay rollback using the last saved journal,
                   e.g. after a crashed run.
+  clear-log       Clear the log file.
+  show-log        Display the contents of the log file.
 
 Options:
   -c, --config PATH   Use PATH instead of the default config file.
@@ -1631,7 +1684,7 @@ Config file search order (unless -c is given):
   /etc/vfio-toggle/vfio-toggle.conf
   ${SCRIPT_DIR}/vfio-toggle.conf
 
-Must be run as root, except 'status' and 'list-devices'.
+Must be run as root, except 'status', 'list-devices', and 'show-log'.
 EOF
 }
 
@@ -1692,6 +1745,22 @@ main() {
       acquire_lock
       do_manual_rollback
       release_lock
+      ;;
+    clear-log)
+      require_root
+      require_config
+      if [[ -n "$LOG_FILE" ]]; then
+        > "$LOG_FILE"
+        echo "Log file $LOG_FILE cleared."
+      fi
+      ;;
+    show-log)
+      require_config
+      if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
+        cat "$LOG_FILE"
+      else
+        echo "Log file ${LOG_FILE:-not configured} does not exist."
+      fi
       ;;
     help|-h|--help)
       usage; exit 0 ;;
