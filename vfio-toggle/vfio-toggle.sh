@@ -806,7 +806,8 @@ terminate_pids_safely() {
   done
 
   if [[ ${#services_to_stop[@]} -gt 0 ]]; then
-    sleep 1
+    # systemctl stop is synchronous, but we inject a minor scheduler pause for cgroup PIDs to fully drop
+    sleep 0.2
   fi
 
   # Re-evaluate processes as stopping the services will already reap dependent daemon PIDs
@@ -843,10 +844,12 @@ terminate_pids_safely() {
     return 0
   fi
 
-  local waited=0
+  local waited_ms=0
+  local max_wait_ms=$(( PROCESS_KILL_GRACE_PERIOD * 10 ))
   local -a still=()
   local cur_start
-  while (( waited < PROCESS_KILL_GRACE_PERIOD )); do
+
+  while (( waited_ms < max_wait_ms )); do
     still=()
     for pid in "${to_wait[@]}"; do
       cur_start="$(ps -o lstart= -p "$pid" 2>/dev/null || true)"
@@ -858,8 +861,8 @@ terminate_pids_safely() {
       break
     fi
     to_wait=("${still[@]}")
-    sleep 1
-    waited=$((waited+1))
+    sleep 0.1
+    waited_ms=$((waited_ms+1))
   done
 
   still=()
@@ -869,12 +872,23 @@ terminate_pids_safely() {
       still+=("$pid")
     fi
   done
+
   if (( ${#still[@]} > 0 )); then
     for pid in "${still[@]}"; do
       log_warn "PID $pid still alive after ${PROCESS_KILL_GRACE_PERIOD}s grace period; sending SIGKILL."
       kill -KILL "$pid" 2>/dev/null || true
     done
-    sleep 1
+
+    local iter=0 all_dead
+    while (( iter < 20 )); do
+      all_dead=1
+      for pid in "${still[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then all_dead=0; break; fi
+      done
+      (( all_dead == 1 )) && break
+      sleep 0.1
+      iter=$((iter+1))
+    done
   fi
 }
 
@@ -924,6 +938,7 @@ is_unit_active() {
 terminate_graphical_sessions() {
   command -v loginctl >/dev/null 2>&1 || return 0
   local sid class
+  local -a active_sids=()
 
   # Terminate all user/greeter sessions, forcing a complete drop of DRM
   # contexts even if they are raw tty-launched Wayland sessions.
@@ -934,8 +949,29 @@ terminate_graphical_sessions() {
     if [[ "$class" == "user" || "$class" == "greeter" ]]; then
       log_info "Terminating active local logind session $sid (class=$class)..."
       loginctl terminate-session "$sid" 2>>"${LOG_FILE}" || true
+      active_sids+=("$sid")
     fi
   done
+
+  # Active poll replacing the fixed sleep timer. Continually verifies state disappearance up to 5s.
+  if (( ${#active_sids[@]} > 0 )); then
+    local iter=0 remaining=0
+    while (( iter < 50 )); do
+      remaining=0
+      for sid in "${active_sids[@]}"; do
+        if loginctl show-session "$sid" >/dev/null 2>&1; then
+          local state
+          state="$(loginctl show-session -p State --value "$sid" 2>/dev/null || true)"
+          if [[ -n "$state" ]]; then
+            remaining=$((remaining+1))
+          fi
+        fi
+      done
+      (( remaining == 0 )) && break
+      sleep 0.1
+      iter=$((iter+1))
+    done
+  fi
 }
 
 stop_display_manager() {
@@ -950,9 +986,20 @@ stop_display_manager() {
     DM_WAS_ACTIVE="true"
     persist_state
     log_info "Stopping display manager: $unit"
-    systemctl stop "$unit" 2>>"${LOG_FILE}" || abort "Failed to stop display manager unit '$unit'."
+
+    # Conditional behavior protects from aborting mid-rollback over a trivial stopping fault
+    if [[ "${ROLLING_BACK:-0}" == "1" ]]; then
+      systemctl stop "$unit" 2>>"${LOG_FILE}" || log_warn "Failed to stop display manager unit '$unit' during rollback."
+    else
+      systemctl stop "$unit" 2>>"${LOG_FILE}" || abort "Failed to stop display manager unit '$unit'."
+    fi
     journal_push "stop_dm"
-    sleep 1
+
+    local wait=0
+    while is_unit_active "$unit" && (( wait < 50 )); do
+      sleep 0.1
+      wait=$((wait+1))
+    done
   else
     log_info "Display manager '$unit' is already inactive; nothing to stop."
     DM_WAS_ACTIVE="false"
@@ -960,7 +1007,6 @@ stop_display_manager() {
   fi
 
   terminate_graphical_sessions
-  sleep 1
 }
 
 start_display_manager() {
@@ -1236,14 +1282,25 @@ bind_device_to_vfio() {
   fi
 
   printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
-  sleep 0.3
+
+  local iter=0
   cur="$(pci_driver_of "$addr")"
+  while [[ "$cur" != "vfio-pci" ]] && (( iter < 10 )); do
+    sleep 0.1
+    cur="$(pci_driver_of "$addr")"
+    iter=$((iter+1))
+  done
 
   if [[ "$cur" != "vfio-pci" ]]; then
     log_warn "$addr did not bind via drivers_probe (current: '${cur:-none}'); trying a direct bind."
     printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers/vfio-pci/bind" 2>>"${LOG_FILE}" || true
-    sleep 0.3
+    iter=0
     cur="$(pci_driver_of "$addr")"
+    while [[ "$cur" != "vfio-pci" ]] && (( iter < 10 )); do
+      sleep 0.1
+      cur="$(pci_driver_of "$addr")"
+      iter=$((iter+1))
+    done
   fi
 
   if [[ "$cur" != "vfio-pci" ]]; then
@@ -1269,14 +1326,27 @@ rebind_original_driver() {
   local addr="$1"
   local expected="${ORIG_DRIVER[$addr]:-}"
   printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers_probe" 2>>"${LOG_FILE}" || true
-  sleep 0.3
-  local cur; cur="$(pci_driver_of "$addr")"
+
+  local iter=0 cur
+  cur="$(pci_driver_of "$addr")"
+  while [[ -z "$cur" ]] && (( iter < 10 )); do
+    sleep 0.1
+    cur="$(pci_driver_of "$addr")"
+    iter=$((iter+1))
+  done
+
   if [[ -z "$cur" && -n "$expected" && -d "${SYSFS_PCI}/drivers/${expected}" ]]; then
     log_warn "$addr did not bind via drivers_probe (current: '${cur:-none}'); trying direct bind to '$expected'."
     printf '%s\n' "$addr" > "${SYSFS_PCI}/drivers/${expected}/bind" 2>>"${LOG_FILE}" || true
-    sleep 0.3
+    iter=0
     cur="$(pci_driver_of "$addr")"
+    while [[ -z "$cur" ]] && (( iter < 10 )); do
+      sleep 0.1
+      cur="$(pci_driver_of "$addr")"
+      iter=$((iter+1))
+    done
   fi
+
   if [[ -z "$cur" ]]; then
     abort "Device $addr has no driver bound after restore attempt (expected '${expected:-<unknown>}'). Its driver module may not be installed. Check: modinfo ${expected:-<driver>}; dmesg | tail -50"
   fi
@@ -1394,7 +1464,22 @@ do_bind() {
       log_info "Checking for processes using GPU device nodes (kill attempt $((tries+1))): ${pids[*]}"
       terminate_pids_safely "${pids[@]}"
       tries=$((tries+1))
-      sleep 1
+
+      # Polling verify immediately before executing next outer attempt iteration
+      if (( tries < 3 )); then
+        local check_iter=0
+        while (( check_iter < 10 )); do
+          local tmp_pids=()
+          while IFS= read -r p; do
+            [[ -n "$p" ]] && tmp_pids+=("$p")
+          done < <(find_pids_using_devices "${nodes[@]}")
+          if (( ${#tmp_pids[@]} == 0 )); then
+            break
+          fi
+          sleep 0.1
+          check_iter=$((check_iter+1))
+        done
+      fi
     done
   else
     log_debug "No DRM/device nodes found for target devices."
