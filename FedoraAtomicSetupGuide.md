@@ -225,6 +225,10 @@ Log out and log in as your user (`christian`).
 	sudo firewall-cmd --zone=internal --add-port=9757/udp --permanent #wivrn
 	sudo firewall-cmd --zone=internal --add-port=53317/tcp --permanent #localsend
 	sudo firewall-cmd --zone=internal --add-port=53317/udp --permanent #localsend
+	sudo firewall-cmd --zone=internal --add-port=8765/tcp --permanent
+	sudo firewall-cmd --zone=internal --add-port=8765/udp --permanent
+	sudo firewall-cmd --zone=internal --add-port=8090/tcp --permanent
+	sudo firewall-cmd --zone=internal --add-port=8090/udp --permanent
 	sudo firewall-cmd --zone=external --add-port=53317/tcp --permanent #localsend
 	sudo firewall-cmd --zone=external --add-port=53317/udp --permanent #localsend
 	sudo firewall-cmd --zone=external --add-service=ipp --permanent #printing
