@@ -329,17 +329,16 @@ ip a
     passdb backend = tdbsam
     force user = christian
 
-    # Interface isolation (keep Samba strictly on loopback, virbr0, and br-hotspot)
-    bind interfaces only = yes
-    interfaces = 127.0.0.1/8 lo virbr0 br-hotspot
+    hosts allow = 127.0.0.1 192.168.42.0/24 192.168.122.0/24
+    hosts deny = ALL
 
-    # fix GnuTLS timeout
+    # Fix the GnuTLS / testparm freeze
     client min protocol = SMB2_10
     server min protocol = SMB2_10
     client ipc min protocol = SMB2_10
     ntlm auth = ntlmv2-only
 
-    # Prevents Dolphin from hanging on usershare queries
+    # Disable usershare probing in Dolphin
     usershare max shares = 0
 
 [Shared]
