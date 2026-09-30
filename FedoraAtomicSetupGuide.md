@@ -327,11 +327,20 @@ ip a
     workgroup = SAMBA
     security = user
     passdb backend = tdbsam
-    bind interfaces only = Yes
-    interfaces = lo virbr0 br-hotspot
+    force user = christian
+
+    # Interface isolation (keep Samba strictly on loopback, virbr0, and br-hotspot)
+    bind interfaces only = yes
+    interfaces = 127.0.0.1/8 lo virbr0 br-hotspot
+
+    # fix GnuTLS timeout
     client min protocol = SMB2_10
     server min protocol = SMB2_10
-    force user = christian
+    client ipc min protocol = SMB2_10
+    ntlm auth = ntlmv2-only
+
+    # Prevents Dolphin from hanging on usershare queries
+    usershare max shares = 0
 
 [Shared]
     path = /var/mnt/DATAONE/Shared
