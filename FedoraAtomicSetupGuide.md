@@ -327,8 +327,10 @@ ip a
     workgroup = SAMBA
     security = user
     passdb backend = tdbsam
-    bind interfaces only = yes
-    interfaces = virbr0,br-hotspot
+    bind interfaces only = Yes
+    interfaces = lo virbr0 br-hotspot
+    client min protocol = SMB2_10
+    server min protocol = SMB2_10
     force user = christian
 
 [Shared]
