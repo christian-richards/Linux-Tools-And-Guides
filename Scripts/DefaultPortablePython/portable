@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# A relocatable environment for user-supplied runtimes and projects.
+# Requires Bash and standard Linux utilities; never downloads anything.
+set -euo pipefail
+
+fail() { printf 'portable: %s\n' "$*" >&2; exit 1; }
+
+# Resolve the launcher itself, not the caller's working directory. This also
+# supports launching through a symlink and folder names containing spaces.
+launcher=$(readlink -f -- "${BASH_SOURCE[0]}")
+export PORTABLE_ROOT=${launcher%/*}
+host_bash=$BASH
+host_path=$PATH
+
+usage() {
+    cat <<'EOF'
+Usage: ./portable [build|run|shell|help] [--program NAME] [--] [arguments...]
+
+  build   Run commands/NAME/build from projects/NAME.
+  run     Run commands/NAME/run from projects/NAME and pass arguments to it.
+  shell   Open Bash in projects/NAME with the portable environment.
+  help    Show this help.
+
+The command defaults to run; NAME defaults to default.
+Build also accepts arguments. Use -- before literal arguments named --program.
+Command files are Bash scripts; use "$@" to forward arguments to your program.
+
+Examples:
+  ./portable
+  ./portable build --program myapp
+  ./portable run --serve 0.0.0.0
+  ./portable run --program myapp -- --program application-option
+  ./portable shell
+EOF
+}
+
+action=${1:-run}
+if (( $# )); then shift; fi
+case $action in
+    help|-h|--help) usage; exit 0 ;;
+    build|run|shell) ;;
+    *) fail "unknown command '$action' (use ./portable help)" ;;
+esac
+
+program=default
+arguments=()
+while (( $# )); do
+    case $1 in
+        --program)
+            (( $# >= 2 )) || fail '--program needs a folder name'
+            program=$2
+            shift 2
+            ;;
+        --program=*) program=${1#*=}; shift ;;
+        --) shift; arguments+=("$@"); break ;;
+        *) arguments+=("$1"); shift ;;
+    esac
+done
+# Names identify one direct child directory, never an arbitrary path.
+case $program in
+    ''|.|..|*/*) fail 'program must be a single folder name' ;;
+esac
+export PORTABLE_PROGRAM=$program
+export PORTABLE_PROJECT="$PORTABLE_ROOT/projects/$program"
+[[ -d $PORTABLE_PROJECT ]] || fail "missing project directory: $PORTABLE_PROJECT"
+[[ -d $PORTABLE_ROOT/commands/$program ]] || fail "missing commands directory: $PORTABLE_ROOT/commands/$program"
+if [[ $action == shell ]]; then
+    (( ${#arguments[@]} == 0 )) || fail 'shell accepts only --program NAME'
+else
+    command_file="$PORTABLE_ROOT/commands/$program/$action"
+    [[ -f $command_file && -r $command_file ]] || fail "missing or unreadable command file: $command_file"
+fi
+
+# Ignore host-specific interpreter and startup settings that can leak into this
+# environment. This changes only this process and its children, never the host.
+unset PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONSTARTUP PYTHONPYCACHEPREFIX
+unset VIRTUAL_ENV CONDA_PREFIX CONDA_DEFAULT_ENV BASH_ENV ENV CDPATH
+unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER PIP_REQUIRE_VIRTUALENV
+
+# HOME is shared by all projects in this portable folder. Override deliberately
+# with PORTABLE_HOME=/absolute/path ./portable ... if you want another location.
+export HOME=${PORTABLE_HOME:-"$PORTABLE_ROOT/portable-home"}
+[[ $HOME == /* ]] || fail 'PORTABLE_HOME must be an absolute path'
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_CACHE_HOME="$HOME/.cache"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_STATE_HOME="$HOME/.local/state"
+export XDG_RUNTIME_DIR="$HOME/.run"
+export TMPDIR="$HOME/.tmp" TMP="$HOME/.tmp" TEMP="$HOME/.tmp"
+export HISTFILE="$HOME/.bash_history"
+export PYTHONNOUSERSITE=1
+export PIP_CONFIG_FILE=/dev/null PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
+export npm_config_cache="$XDG_CACHE_HOME/npm"
+export npm_config_prefix="$HOME/.local"
+export npm_config_userconfig="$XDG_CONFIG_HOME/npm/npmrc"
+export NODE_REPL_HISTORY="$HOME/.node_repl_history"
+export CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup"
+export GIT_CONFIG_GLOBAL="$HOME/.gitconfig"
+
+# Optional, trusted Bash configuration, evaluated on every invocation. Use it
+# for additional runtime variables or intentional overrides of these defaults.
+if [[ -f $PORTABLE_ROOT/portable.conf ]]; then
+    source "$PORTABLE_ROOT/portable.conf"
+fi
+mkdir -p -- "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" \
+    "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$TMPDIR" "$HOME/.local/bin"
+chmod 700 -- "$XDG_RUNTIME_DIR"
+
+# Preserve host utilities (including Git) while giving portable tools priority.
+# Include runtime roots and their conventional command directories. Do not scan
+# library trees: executable package files can make PATH exceed Linux's limit.
+# Avoid relative/empty host PATH entries: we change directory below.
+export PATH=
+add_path() {
+    [[ -d $1 ]] || return 0
+    case $1 in *:*) fail "PATH directories cannot contain colons: $1" ;; esac
+    case :$PATH: in *:"$1":*) return 0 ;; esac
+    PATH=${PATH:+"$PATH:"}$1
+}
+if [[ -d $PORTABLE_ROOT/tools ]]; then
+    for runtime in "$PORTABLE_ROOT"/tools/*; do
+        [[ -d $runtime ]] || continue
+        add_path "$runtime/bin"
+        add_path "$runtime/sbin"
+        add_path "$runtime/Scripts"
+        add_path "$runtime"
+    done
+fi
+add_path "$HOME/.local/bin"
+# Preserve the original order of absolute host entries.
+IFS=: read -r -a host_dirs <<< "$host_path"
+for directory in "${host_dirs[@]}"; do
+    [[ $directory == /* ]] && add_path "$directory"
+done
+# Basic OS commands remain available even when the caller used a minimal PATH.
+add_path /usr/local/bin
+add_path /usr/bin
+add_path /bin
+export PATH
+
+# Pip entry points can embed absolute interpreter paths. Turn those in the
+# supplied runtime into relative launchers before use, including after a move.
+if [[ -x $PORTABLE_ROOT/tools/python/bin/python3 ]]; then
+    "$PORTABLE_ROOT/tools/python/bin/python3" \
+        "$PORTABLE_ROOT/support/relocate_python.py" "$PORTABLE_ROOT/tools/python/bin"
+fi
+
+cd -- "$PORTABLE_PROJECT"
+if [[ $action == shell ]]; then
+    export PS1="(portable:$program) \\w\\$ "
+    exec "$host_bash" --noprofile --norc -i
+fi
+# Bash command files need not have executable permission. They receive exact
+# argument boundaries, and their exit status/signals propagate to the caller.
+exec "$host_bash" --noprofile --norc "$command_file" "${arguments[@]}"

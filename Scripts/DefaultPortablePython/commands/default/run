@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run from projects/default. "$@" forwards arguments exactly as received.
+# Use exec for the final program so its exit status and signals reach the caller.
+set -e
+exec python launch.py "$@"

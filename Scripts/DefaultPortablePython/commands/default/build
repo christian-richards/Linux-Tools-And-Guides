@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# All relative paths below refer to projects/default (or the selected project).
+# This file is editable Bash, so you can use several commands, absolute paths,
+# and variables such as "$PORTABLE_ROOT". Stop if a build step fails.
+set -e
+
+# Example Python build; uncomment after adding your requirements file.
+# python -m pip install -r requirements.txt "$@"
+# For an offline build using wheels you have supplied:
+# python -m pip install --no-index --find-links wheels -r requirements.txt "$@"
+
+printf 'Edit commands/%s/build to add your build commands.\n' "$PORTABLE_PROGRAM"
