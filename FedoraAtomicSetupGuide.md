@@ -209,7 +209,7 @@ Test the mount:
 
 Log out and log in as your user (`christian`).
 
-### Shared Hotspot And VM Network Setup
+### (DEPRECATED, USE THE NEW HOTSPOT TOOL) Shared Hotspot And VM Network Setup
     sudo nmcli con add type bridge ifname br-hotspot con-name br-hotspot autoconnect yes #Add the bridge connection profile
     sudo nmcli con modify br-hotspot ipv4.method manual ipv4.addresses 192.168.42.1/24 #Configure the bridge IP address No gateway needed on the bridge itself
     sudo nmcli con modify br-hotspot bridge.stp no # Disable Spanning Tree Protocol (usually not needed for a simple setup)
