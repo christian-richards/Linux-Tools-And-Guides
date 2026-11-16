@@ -19,8 +19,8 @@
 # touches NAT. Radio settings (channel, width, HT/VHT/HE capabilities) are read
 # from the adapter itself, so a different adapter needs no code changes.
 #
-# Requirements: bash 4+, hostapd (+ hostapd_cli), dnsmasq, ip (iproute2), iw, nft
-# (nftables), flock (util-linux). NetworkManager and firewalld are optional.
+# Requirements: bash 4.4+, hostapd (+ hostapd_cli), dnsmasq, ip (iproute2), iw,
+# nft (nftables), flock + setsid (util-linux), coreutils. NM/firewalld are optional.
 #
 # Firewall note: firewalld is handled automatically (the bridge is placed in the
 # "trusted" zone until `stop`; a `firewall-cmd --reload` drops that binding, so
@@ -28,10 +28,14 @@
 # arriving on the bridge, allow the bridge interface (default: br-hotspot) in it:
 # another firewall's "drop" cannot be overridden from a separate nftables table.
 # =============================================================================
-set -euo pipefail
+# Ownership flags are consumed indirectly by restore()/save_state().
+# shellcheck disable=SC2034
+set -Eeuo pipefail
+set +m                              # setsid must exec the child without forking
 shopt -s nullglob
+umask 077                           # configurations contain the Wi-Fi password
 export LC_ALL=C
-PATH="$PATH:/usr/sbin:/sbin"
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 ############################################################################
 # CONFIGURATION - every tunable lives in this block
@@ -65,9 +69,12 @@ DNSMASQ_EXTRA=""
 # --- Internals ---
 STATE_DIR="/run/hotspot"             # runtime files; /run is cleared on reboot
 NFT_TABLE="hotspot"                  # private nftables table (family inet)
-LOCK_FILE="/run/hotspot.lock"        # serializes start/stop; outside STATE_DIR on purpose
+LOCK_FILE="/run/hotspot.lock"        # serializes all commands; outside STATE_DIR on purpose
 LOG_FILE="/run/hotspot.log"          # progress + hostapd + dnsmasq log; outside STATE_DIR so a failed
                                      # start leaves it behind; truncated by each start
+AP_WAIT=20                          # seconds, excluding DFS radar checks
+DFS_WAIT=660                        # includes the 10-minute weather-radar CAC
+SERVICE_WAIT=10                     # seconds for DHCP/DNS and final readiness
 
 # IEEE 802.11 capability bit -> hostapd flag (bit positions are fixed by the standard).
 HT_BITS=(0:LDPC 5:SHORT-GI-20 6:SHORT-GI-40 7:TX-STBC 11:MAX-AMSDU-7935)
@@ -82,18 +89,29 @@ STATE_FILE="$STATE_DIR/state"
 
 # Values that stop/status need later; start saves them to $STATE_FILE.
 PHY="" USB_DIR="" USB_POWER_PREV="" IP_FORWARD_PREV="" NM_MANAGED_PREV="" REG_PREV="" BRIDGE_OWNED="" NFT_OWNED=""
+WIFI_OWNED="" WIFI_WAS_UP="" PREFIX="" START_ERROR="" FW_OWNED="" FW_ZONE_PREV="" STARTING_PID=""
+STATE_VERSION=2
 SAVED_VARS=(WIFI_IFACE BRIDGE BRIDGE_IP INTERNET USB_DIR USB_POWER_PREV IP_FORWARD_PREV
-            NM_MANAGED_PREV REG_PREV BRIDGE_OWNED NFT_OWNED)
+            NM_MANAGED_PREV REG_PREV BRIDGE_OWNED NFT_OWNED WIFI_OWNED WIFI_WAS_UP PREFIX
+            FW_OWNED FW_ZONE_PREV STATE_VERSION NFT_TABLE)
 
 die()  { echo "hotspot: $*" >&2; exit 1; }
-log()  { echo "==> $*" | tee -a "$LOG_FILE"; }
+log()  { printf '==> %s\n' "$*" >>"$LOG_FILE"; printf '==> %s\n' "$*"; }
 need() { local c; for c; do command -v "$c" >/dev/null || die "required command not found: $c"; done; }
 
 # retry N CMD...  run CMD until it succeeds, at most N times, 0.5 s apart
 retry() { local n=$1; shift; until "$@"; do (( --n > 0 )) || return 1; sleep 0.5; done; }
 
 # quiet CMD...  run CMD silently; show its output only if it fails
-quiet() { local out; out=$("$@" 2>&1) || { echo "$out" >&2; return 1; }; }
+quiet() {
+  local out rc
+  out=$("$@" 2>&1) || {
+    rc=$?
+    printf '%s\n' "$out" >&2
+    [[ ! -f $LOG_FILE ]] || printf '%s\n' "$out" >>"$LOG_FILE"
+    return "$rc"
+  }
+}
 
 to_bool() {
   case ${1,,} in
@@ -103,7 +121,13 @@ to_bool() {
   esac
 }
 
-ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( a << 24 | b << 16 | c << 8 | d )); }
+ip2int() {
+  local a b c d octet
+  [[ $1 =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS=. read -r a b c d <<<"$1"
+  for octet in "$a" "$b" "$c" "$d"; do (( 10#$octet <= 255 )) || return 1; done
+  echo $(( 10#$a << 24 | 10#$b << 16 | 10#$c << 8 | 10#$d ))
+}
 int2ip() { echo "$(( $1 >> 24 & 255 )).$(( $1 >> 16 & 255 )).$(( $1 >> 8 & 255 )).$(( $1 & 255 ))"; }
 
 # bit_flags VALUE BIT:FLAG...  ->  "[FLAG][FLAG]" for every bit set in VALUE
@@ -122,11 +146,33 @@ stbc_flag() { local s=("" 1 12 123 1234); if (( $1 >= 1 && $1 <= 4 )); then prin
 write_file() {
   local tmp
   tmp=$(mktemp "$1.XXXXXX") || return 1
-  cat >"$tmp" && mv -f "$tmp" "$1" || { rm -f "$tmp"; return 1; }
+  if ! { cat >"$tmp" && mv -fT -- "$tmp" "$1"; }; then rm -f -- "$tmp"; return 1; fi
 }
 
 save_state() { local v; for v in "${SAVED_VARS[@]}"; do printf '%s=%q\n' "$v" "${!v}"; done | write_file "$STATE_FILE"; }
-load_state() { if [[ -r $STATE_FILE ]]; then source "$STATE_FILE"; fi; }
+
+# Old versions also used shell assignments. Only source files protected by a
+# trusted directory and ownership; never execute state writable by another user.
+check_owned() {
+  local owner mode
+  [[ ! -L $1 ]] || die "refusing symlink: $1"
+  [[ -e $1 ]] || return 0
+  read -r owner mode < <(stat -c '%u %a' -- "$1")
+  if [[ $owner != "$EUID" ]] || (( (8#$mode & 0022) != 0 )); then die "unsafe owner or permissions on $1"; fi
+}
+
+load_state() {
+  check_owned "$STATE_DIR"
+  check_owned "$STATE_FILE"
+  if [[ -e $STATE_DIR && ! -f $STATE_FILE ]]; then die "missing recovery state: $STATE_FILE; inspect $STATE_DIR before removing it"; fi
+  if [[ -r $STATE_FILE ]]; then
+    STATE_VERSION=1
+    # shellcheck source=/dev/null
+    source "$STATE_FILE"
+    if (( STATE_VERSION == 1 )); then WIFI_OWNED=$BRIDGE_OWNED; FW_OWNED=$BRIDGE_OWNED; fi
+    STATE_VERSION=2
+  fi
+}
 
 # alive PID  true if PID is running; a zombie (exited, not yet reaped by its parent) is not
 alive() {
@@ -137,17 +183,48 @@ alive() {
 
 # daemon_pid PIDFILE NAME  prints the pid if PIDFILE names a live process called NAME
 daemon_pid() {
-  local pid
+  local pid arg config found=0 ticks
   [[ -r $1 ]] || return 1
   pid=$(<"$1")
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
   [[ $(cat "/proc/$pid/comm" 2>/dev/null) == "$2" ]] && alive "$pid" || return 1
+  config="${1%/*}/$2.conf"
+  while IFS= read -r -d '' arg; do
+    if [[ $arg == "$config" || $arg == "--conf-file=$config" ]]; then found=1; fi
+  done <"/proc/$pid/cmdline" 2>/dev/null || return 1
+  (( found )) || return 1
+  if [[ -f $1.start ]]; then
+    ticks=$(process_start "$pid") || return 1
+    [[ $ticks == "$(<"$1.start")" ]] || return 1
+  fi
   echo "$pid"
+}
+
+process_start() {
+  local stat rest
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  rest=${stat##*) }                  # comm may itself contain spaces or ')'
+  awk '{print $20}' <<<"$rest"       # field 22 in /proc/PID/stat
+}
+
+# Both daemons stay in the foreground in their own session. This gives us their
+# real PID and captures even early stderr errors without hostapd's optional -f.
+start_daemon() {
+  local pidfile=$1 pid ticks; shift
+  setsid -- "$@" </dev/null >>"$LOG_FILE" 2>&1 9>&- &
+  pid=$!
+  STARTING_PID=$pid
+  printf '%s\n' "$pid" | write_file "$pidfile"
+  ticks=$(process_start "$pid") || { echo "hotspot: ${pidfile##*/} exited during launch" >&2; return 1; }
+  printf '%s\n' "$ticks" | write_file "$pidfile.start"
+  STARTING_PID=""
 }
 
 stop_daemon() {
   local pid sig i
   pid=$(daemon_pid "$1" "$2") || return 0
   for sig in TERM KILL; do
+    daemon_pid "$1" "$2" >/dev/null || return 0
     kill -s "$sig" "$pid" 2>/dev/null || true
     for i in {1..20}; do alive "$pid" || return 0; sleep 0.25; done
   done
@@ -160,7 +237,22 @@ attempt() { "$@" || { echo "hotspot: cleanup step failed: $*" >&2; CLEANUP_FAILE
 
 # hostapd_enabled  true once hostapd reports the AP as ENABLED (not merely started)
 hostapd_enabled() {
-  [[ $(hostapd_cli -p "$STATE_DIR/hostapd" -i "$WIFI_IFACE" status 2>/dev/null) == *state=ENABLED* ]]
+  daemon_pid "$STATE_DIR/hostapd.pid" hostapd >/dev/null || return 1
+  local status
+  status=$(timeout 2 hostapd_cli -p "$STATE_DIR/hostapd" -i "$WIFI_IFACE" status 2>/dev/null) || return 1
+  [[ $'\n'$status$'\n' == *$'\nstate=ENABLED\n'* ]]
+}
+
+wait_for_ap() {
+  local deadline=$(( SECONDS + $1 ))
+  # Allow exec/initialization to finish, but fail promptly if the process exits.
+  sleep 0.1
+  while (( SECONDS < deadline )); do
+    alive "$(<"$STATE_DIR/hostapd.pid")" || die "hostapd exited before the AP became ready"
+    if hostapd_enabled; then return 0; fi
+    sleep 0.5
+  done
+  die "access point did not become ENABLED within $1 seconds"
 }
 
 # nm_set DEV yes|no  set NetworkManager's managed flag and confirm NM acted on it
@@ -184,6 +276,15 @@ nm_managed() {
 # fw_zone change|remove  bind the bridge to firewalld's trusted zone (runtime only; no-op unless firewalld is running)
 fw_zone() {
   command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1 || return 0
+  if [[ $1 == change ]]; then
+    FW_ZONE_PREV=$(firewall-cmd --get-zone-of-interface="$BRIDGE" 2>/dev/null || true)
+    if [[ $FW_ZONE_PREV == "no zone" ]]; then FW_ZONE_PREV=""; fi
+    FW_OWNED=1
+    save_state || return 1
+  elif [[ -n $FW_ZONE_PREV ]]; then
+    quiet firewall-cmd "--zone=$FW_ZONE_PREV" "--change-interface=$BRIDGE"
+    return
+  fi
   # a `firewall-cmd --reload` already dropped the binding: nothing left to remove
   if [[ $1 == remove ]] && ! firewall-cmd --zone=trusted --query-interface="$BRIDGE" >/dev/null 2>&1; then return 0; fi
   quiet firewall-cmd --zone=trusted "--$1-interface=$BRIDGE"
@@ -233,9 +334,24 @@ $(wifi_ifaces | sed 's/^/  /')
 Pick one with --iface=NAME or --usb-id=VVVV:PPPP"
   fi
   [[ -e /sys/class/net/$WIFI_IFACE/phy80211 ]] || die "$WIFI_IFACE is not a wireless interface"
-  [[ -z $(ip -4 route show default dev "$WIFI_IFACE") ]] \
+  [[ -z $(ip -4 route show default dev "$WIFI_IFACE") && -z $(ip -6 route show default dev "$WIFI_IFACE") ]] \
     || die "$WIFI_IFACE carries the host's default route; refusing to turn it into an access point"
+  [[ ! -e /sys/class/net/$WIFI_IFACE/master ]] || die "$WIFI_IFACE already belongs to a bridge or bond"
+  [[ $(iw dev "$WIFI_IFACE" info | awk '$1 == "type" {print $2}') == managed ]] \
+    || die "$WIFI_IFACE must be in managed mode before starting"
+  WIFI_WAS_UP=0
+  if ip -o link show dev "$WIFI_IFACE" | grep -Eq '<([^>]*,)?UP[,>]'; then WIFI_WAS_UP=1; fi
   PHY=$(<"/sys/class/net/$WIFI_IFACE/phy80211/name")
+}
+
+check_rfkill() {
+  local block
+  for block in /sys/class/ieee80211/"$PHY"/rfkill*; do
+    if [[ $(<"$block/hard") == 1 ]]; then die "$WIFI_IFACE is hardware blocked by RF-kill; enable its physical radio switch"; fi
+    if [[ $(<"$block/soft") == 1 ]]; then
+      die "$WIFI_IFACE is software blocked by RF-kill; run 'sudo rfkill unblock ${block##*/rfkill}', then retry"
+    fi
+  done
 }
 
 # band5  the 5 GHz section of `iw phy` output (empty if the adapter has none)
@@ -263,10 +379,20 @@ validate_settings() {
   USE_WIFI6=$(to_bool "$USE_WIFI6")
   USB_ID=${USB_ID,,}
   COUNTRY_CODE=${COUNTRY_CODE^^}
-  (( ${#SSID} >= 1 && ${#SSID} <= 32 )) && [[ $SSID != *[[:cntrl:]]* ]] || die "SSID must be 1-32 bytes, no control characters"
+  if (( ${#SSID} < 1 || ${#SSID} > 32 )) || [[ $SSID == *[[:cntrl:]]* ]]; then die "SSID must be 1-32 bytes, no control characters"; fi
   [[ -z $PASSWORD || $PASSWORD =~ ^[[:print:]]{8,63}$ ]] || die "password must be 8-63 printable ASCII characters (or \"\" for an open network)"
   [[ $CHANNEL_WIDTH =~ ^(20|40|80)$ ]] || die "channel width must be 20, 40 or 80"
   [[ $CHANNEL =~ ^(auto|[0-9]+)$ ]] || die "channel must be a number or 'auto'"
+  if [[ $CHANNEL != auto ]]; then
+    (( ${#CHANNEL} <= 3 )) || die "invalid 5 GHz channel: $CHANNEL"
+    CHANNEL=$(( 10#$CHANNEL ))
+    (( CHANNEL >= 32 && CHANNEL <= 177 )) || die "invalid 5 GHz channel: $CHANNEL"
+  fi
+  [[ -z $COUNTRY_CODE || $COUNTRY_CODE =~ ^[A-Z]{2}$ ]] || die "country must be a two-letter code"
+  [[ $USB_ID =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "USB id must have the form VVVV:PPPP"
+  [[ -z $WIFI_IFACE || $WIFI_IFACE =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]] || die "invalid interface name"
+  [[ $BRIDGE =~ ^[a-zA-Z0-9_.-]{1,15}$ && $BRIDGE != "$WIFI_IFACE" ]] || die "invalid bridge name"
+  [[ $NFT_TABLE =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || die "invalid nftables table name"
   derive_network
 }
 
@@ -275,7 +401,10 @@ derive_network() {
   local ip_re='^[0-9]+(\.[0-9]+){3}$' net bcast mask
   [[ $CIDR =~ ^[0-9.]+/[0-9]+$ && ${CIDR%/*} =~ $ip_re && $BRIDGE_IP =~ $ip_re ]] \
     || die "CIDR and BRIDGE_IP must look like 192.168.42.0/24 and 192.168.42.1"
+  if ! ip2int "${CIDR%/*}" >/dev/null || ! ip2int "$BRIDGE_IP" >/dev/null; then die "invalid IPv4 address in CIDR or BRIDGE_IP"; fi
   PREFIX=${CIDR#*/}
+  (( ${#PREFIX} <= 2 )) || die "invalid CIDR prefix length"
+  PREFIX=$(( 10#$PREFIX ))
   (( PREFIX >= 8 && PREFIX <= 29 )) || die "CIDR prefix length must be between 8 and 29"
   mask=$(( (0xFFFFFFFF << (32 - PREFIX)) & 0xFFFFFFFF ))
   net=$(( $(ip2int "${CIDR%/*}") & mask ))
@@ -293,13 +422,15 @@ set_regdomain() {
   : "${COUNTRY_CODE:=$REG_PREV}"
   [[ $COUNTRY_CODE =~ ^[A-Z]{2}$ ]] \
     || die "no regulatory country is set (found '${COUNTRY_CODE:-none}'); set COUNTRY_CODE in the script or pass --country=XX"
+  if [[ $COUNTRY_CODE == "$REG_PREV" ]]; then REG_PREV=""; return 0; fi
+  [[ $REG_PREV =~ ^([A-Z]{2}|00)$ ]] || die "cannot determine the current regulatory domain for rollback"
   save_state     # REG_PREV must be on disk before the domain changes
   quiet iw reg set "$COUNTRY_CODE"
 }
 
 # block_start CHANNEL WIDTH  first channel of the aligned WIDTH-MHz block holding CHANNEL
 block_start() {
-  local base=36 span=$(( $2 / 20 * 4 ))
+  local base=36 span=$(( $2 / 5 ))
   if (( $1 >= 149 )); then base=149; fi
   echo $(( $1 - ($1 - base) % span ))
 }
@@ -309,9 +440,42 @@ usable_channels() {
   band5 | awk '$1 == "*" && $3 == "MHz" && !/disabled|no IR|radar/ { gsub(/[][]/, "", $4); print $4 }'
 }
 
+# Validate every 20 MHz member even for a manually selected primary channel.
+# Radar channels are allowed manually; hostapd must complete CAC before success.
+check_channel() {
+  local band c start span=$(( CHANNEL_WIDTH / 5 )) line
+  band=$(band5)
+  start=$(block_start "$CHANNEL" "$CHANNEL_WIDTH")
+  for (( c = start; c < start + span; c += 4 )); do
+    line=$(awk -v ch="[$c]" '$1 == "*" && $3 == "MHz" && $4 == ch {print}' <<<"$band")
+    [[ -n $line && $line != *disabled* ]] || die "channel $c in the requested $CHANNEL_WIDTH MHz block is unavailable"
+    [[ $line != *"no IR"* || $line == *radar* ]] || die "channel $c does not permit initiating radiation in $COUNTRY_CODE"
+  done
+  (( (CHANNEL - start) % 4 == 0 )) || die "invalid primary channel $CHANNEL for the requested block"
+}
+
+# Check both more-specific and covering routes, including policy-routing tables.
+check_network() {
+  local routes route addr bits mask net wanted
+  routes=$(ip -4 route show table all) || die "cannot inspect existing IPv4 routes"
+  wanted=$(ip2int "$BRIDGE_IP")
+  while read -r route; do
+    [[ -n $route && $route != default ]] || continue
+    # VPNs commonly express their default as two /1 routes.
+    [[ $route != 0.0.0.0/1 && $route != 128.0.0.0/1 ]] || continue
+    addr=${route%/*}; bits=${route#*/}
+    if [[ $route != */* ]]; then bits=32; fi
+    if [[ ! $bits =~ ^[0-9]+$ ]] || ! ip2int "$addr" >/dev/null; then continue; fi
+    (( bits > 0 && bits <= 32 )) || continue
+    mask=$(( (0xFFFFFFFF << (32 - (bits < PREFIX ? bits : PREFIX))) & 0xFFFFFFFF ))
+    net=$(ip2int "$addr")
+    (( (net & mask) != (wanted & mask) )) || die "$CIDR overlaps existing route $route; choose another CIDR"
+  done < <(awk '{if ($1 ~ /^(local|broadcast|unreachable|blackhole|prohibit|throw)$/) print $2; else print $1}' <<<"$routes")
+}
+
 # First channel whose whole CHANNEL_WIDTH block is usable (lowest first)
 pick_channel() {
-  local usable c i span=$(( CHANNEL_WIDTH / 20 * 4 ))
+  local usable c i span=$(( CHANNEL_WIDTH / 5 ))
   usable=" $(usable_channels | tr '\n' ' ') "
   for c in $usable; do
     (( $(block_start "$c" "$CHANNEL_WIDTH") == c )) || continue
@@ -360,14 +524,15 @@ radio_conf() {
 ############################################################################
 
 write_hostapd_conf() {
-  local wpa=""     # empty password = open network: no WPA lines at all
+  local wpa="" ssid_hex     # hex encoding preserves leading/trailing spaces
+  ssid_hex=$(printf '%s' "$SSID" | od -An -tx1 | tr -d ' \n')
   if [[ -n $PASSWORD ]]; then wpa=$(printf '%s\n' wpa=2 wpa_key_mgmt=WPA-PSK rsn_pairwise=CCMP "wpa_passphrase=$PASSWORD"); fi
   write_file "$STATE_DIR/hostapd.conf" <<EOF
 interface=$WIFI_IFACE
 bridge=$BRIDGE
 driver=nl80211
 ctrl_interface=$STATE_DIR/hostapd
-ssid=$SSID
+ssid2=$ssid_hex
 country_code=$COUNTRY_CODE
 ieee80211d=1
 wmm_enabled=1
@@ -391,8 +556,8 @@ bind-interfaces
 dhcp-range=$DHCP_START,$DHCP_END,$NETMASK,$LEASE_TIME
 dhcp-authoritative
 dhcp-leasefile=$STATE_DIR/dnsmasq.leases
-pid-file=$STATE_DIR/dnsmasq.pid
-log-facility=$LOG_FILE
+pid-file=
+log-facility=-
 log-dhcp
 $no_internet
 $DNSMASQ_EXTRA
@@ -452,6 +617,7 @@ parse_start_args() {
       --channel=*)  CHANNEL=${1#*=} ;;
       --width=*)    CHANNEL_WIDTH=${1#*=} ;;
       --country=*)  COUNTRY_CODE=${1#*=} ;;
+      --)           shift; positional+=("$@"); break ;;
       -*)           die "unknown option: $1 (see --help)" ;;
       *)            positional+=("$1") ;;
     esac
@@ -462,80 +628,142 @@ parse_start_args() {
   PASSWORD=${positional[1]}
 }
 
-# Undo everything start does. Safe to run at any time, in any state, and to repeat. Best effort:
-# a failing step is reported and makes teardown return 1 (keeping $STATE_DIR so `stop` can retry),
-# but never skips the later steps.
+# Undo start in small, checkpointed steps. Retain recovery state on failure.
+clear_state() {
+  printf -v "$1" '%s' ''
+  save_state || { echo "hotspot: could not checkpoint cleanup" >&2; CLEANUP_FAILED=1; }
+}
+
+# Commit each restored setting immediately. A second stop must not overwrite a
+# new setting made by someone else after a previous, partially successful stop.
+restore() {
+  local flag=$1; shift
+  [[ -n ${!flag} ]] || return 0
+  if "$@"; then clear_state "$flag"; else
+    echo "hotspot: cleanup step failed: $*" >&2
+    CLEANUP_FAILED=1
+  fi
+}
+
+remove_nft() {
+  local tables
+  tables=$(nft list tables) || return 1
+  if grep -qxF "table inet $NFT_TABLE" <<<"$tables"; then nft delete table inet "$NFT_TABLE"; fi
+}
+
+remove_bridge() {
+  if [[ -e /sys/class/net/$BRIDGE ]]; then ip link delete "$BRIDGE"; fi
+}
+
+restore_wifi() {
+  [[ -e /sys/class/net/$WIFI_IFACE ]] || return 0
+  ip link set "$WIFI_IFACE" down || return 1
+  iw dev "$WIFI_IFACE" set type managed || return 1
+  if [[ $WIFI_WAS_UP == 1 ]]; then ip link set "$WIFI_IFACE" up || return 1; fi
+}
+
+restore_usb() {
+  [[ -e $USB_DIR/power/control ]] || return 0  # unplugged
+  printf '%s\n' "$USB_POWER_PREV" >"$USB_DIR/power/control"
+}
+
+restore_nm() {
+  [[ -e /sys/class/net/$WIFI_IFACE ]] || return 0
+  nm_managed "$NM_MANAGED_PREV" "$WIFI_IFACE"
+}
+
+set_forwarding() { printf '%s\n' "$1" >/proc/sys/net/ipv4/ip_forward; }
+
 teardown() {
   CLEANUP_FAILED=0
   attempt stop_daemon "$STATE_DIR/dnsmasq.pid" dnsmasq
   attempt stop_daemon "$STATE_DIR/hostapd.pid" hostapd
-  if [[ -n $NFT_OWNED ]] && nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then attempt nft delete table inet "$NFT_TABLE"; fi
-  if [[ -n $IP_FORWARD_PREV ]]; then attempt tee /proc/sys/net/ipv4/ip_forward <<<"$IP_FORWARD_PREV" >/dev/null; fi
-  # Only touch a bridge this run created (the name alone proves nothing); from then on the adapter was ours too.
-  if [[ -n $BRIDGE_OWNED ]]; then
-    attempt fw_zone remove
-    if ip link show "$BRIDGE" >/dev/null 2>&1; then attempt ip link delete "$BRIDGE"; fi
-    if [[ -e /sys/class/net/$WIFI_IFACE ]]; then          # skipped if the adapter was unplugged
-      attempt ip link set "$WIFI_IFACE" down              # the mode can only change while the link is down
-      attempt iw dev "$WIFI_IFACE" set type managed       # hostapd leaves the radio in AP mode
-    fi
+  # Retain networking if a daemon could not be stopped, so retry remains safe.
+  if (( ! CLEANUP_FAILED )); then
+    restore NFT_OWNED remove_nft
+    restore IP_FORWARD_PREV set_forwarding "$IP_FORWARD_PREV"
+    restore FW_OWNED fw_zone remove
+    restore BRIDGE_OWNED remove_bridge
+    restore WIFI_OWNED restore_wifi
+    restore USB_POWER_PREV restore_usb
+    # Do not hand a half-restored adapter back to NetworkManager.
+    if [[ -z $WIFI_OWNED ]]; then restore NM_MANAGED_PREV restore_nm; fi
+    restore REG_PREV iw reg set "$REG_PREV"
   fi
-  if [[ -n $USB_DIR && -n $USB_POWER_PREV && -e $USB_DIR/power/control ]]; then attempt tee "$USB_DIR/power/control" <<<"$USB_POWER_PREV" >/dev/null; fi
-  if [[ -n $NM_MANAGED_PREV && -e /sys/class/net/$WIFI_IFACE ]]; then attempt nm_managed "$NM_MANAGED_PREV" "$WIFI_IFACE"; fi
-  if [[ -n $REG_PREV ]]; then attempt iw reg set "$REG_PREV"; fi
   if (( CLEANUP_FAILED )); then
-    save_state     # what is left to undo must survive; every step above is safe to repeat
+    save_state || true
     echo "hotspot: cleanup incomplete, state kept in $STATE_DIR (log: $LOG_FILE); fix the problem, then run '$0 stop' again" >&2
   else
-    rm -rf "$STATE_DIR"
+    rm -rf -- "$STATE_DIR" || CLEANUP_FAILED=1
   fi
   return "$CLEANUP_FAILED"
 }
 
 rollback() {
-  trap - EXIT
-  echo "hotspot: start failed, undoing changes. End of $LOG_FILE:" >&2
-  tail -n 10 "$LOG_FILE" >&2 2>/dev/null || true     # hostapd -f sends its startup errors there
-  teardown
+  local rc=$?
+  trap - EXIT ERR INT TERM
+  (( rc != 0 )) || rc=1
+  echo "hotspot: start failed (exit $rc${START_ERROR:+, $START_ERROR}), undoing changes." >&2
+  if [[ -n $STARTING_PID ]] && jobs -pr | grep -qxF "$STARTING_PID"; then
+    kill -KILL "$STARTING_PID" 2>/dev/null || true
+    wait "$STARTING_PID" 2>/dev/null || true
+  fi
+  teardown || true
+  echo "hotspot: End of $LOG_FILE:" >&2
+  tail -n 30 "$LOG_FILE" >&2 2>/dev/null || true
+  exit "$rc"
 }
 
 cmd_start() {
   parse_start_args "$@"
   validate_settings
-  need hostapd hostapd_cli dnsmasq ip iw nft
-  if daemon_pid "$STATE_DIR/hostapd.pid" hostapd >/dev/null; then die "already running; run '$0 stop' first"; fi
+  need hostapd hostapd_cli dnsmasq ip iw nft setsid timeout
+  check_owned "$STATE_DIR"
+  check_owned "$STATE_FILE"
+  if daemon_pid "$STATE_DIR/hostapd.pid" hostapd >/dev/null || daemon_pid "$STATE_DIR/dnsmasq.pid" dnsmasq >/dev/null; then die "already running or degraded; run '$0 stop' first"; fi
   if [[ -e $STATE_DIR ]]; then ( load_state; teardown ); fi     # leftovers of a crashed run
 
   resolve_iface
   check_adapter
+  check_rfkill
   ! ip link show "$BRIDGE" >/dev/null 2>&1 || die "network interface $BRIDGE already exists"
-  [[ -z $(ip -4 route show to root "$CIDR") ]] || die "$CIDR is already routed on this host; choose another CIDR"
+  check_network
   ! nft list table inet "$NFT_TABLE" >/dev/null 2>&1 || die "nftables table inet $NFT_TABLE already exists; choose another NFT_TABLE"
 
   # From here on, anything that fails is rolled back (including the regulatory domain).
-  trap 'exit 1' INT TERM
+  mkdir -m 700 "$STATE_DIR"
+  save_state
+  # Atomic replacement also removes an old dnsmasq-owned log or a stale symlink.
+  write_file "$LOG_FILE" </dev/null
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'START_ERROR="line $LINENO"' ERR
   trap rollback EXIT
-  mkdir -p "$STATE_DIR"
-  : >"$LOG_FILE"
   set_regdomain
   if [[ $CHANNEL == auto ]]; then
     CHANNEL=$(retry 10 pick_channel) \
       || die "no usable non-DFS $CHANNEL_WIDTH MHz channel in regulatory domain $COUNTRY_CODE; try --width=40 or set a channel"
   fi
+  check_channel
   RADIO_CONF=$(radio_conf)
 
   USB_DIR=$(usb_dir "$WIFI_IFACE")
-  if [[ -n $USB_DIR ]]; then USB_POWER_PREV=$(<"$USB_DIR/power/control"); fi
+  if [[ -n $USB_DIR && -r $USB_DIR/power/control ]]; then USB_POWER_PREV=$(<"$USB_DIR/power/control"); fi
   if (( INTERNET )); then IP_FORWARD_PREV=$(</proc/sys/net/ipv4/ip_forward); fi
-  NM_MANAGED_PREV=$(nmcli -g GENERAL.NM-MANAGED device show "$WIFI_IFACE" 2>/dev/null || true)
+  if command -v nmcli >/dev/null && [[ $(nmcli -g RUNNING general 2>/dev/null) == running ]]; then
+    NM_MANAGED_PREV=$(nmcli -g GENERAL.NM-MANAGED device show "$WIFI_IFACE")
+    [[ $NM_MANAGED_PREV == yes || $NM_MANAGED_PREV == no ]] || die "cannot determine NetworkManager ownership of $WIFI_IFACE"
+  fi
   save_state
   write_hostapd_conf
   write_dnsmasq_conf
+  quiet dnsmasq --test --conf-file="$STATE_DIR/dnsmasq.conf"
 
   log "Creating $BRIDGE ($BRIDGE_IP/$PREFIX)"
-  if [[ -n $USB_DIR ]]; then echo on >"$USB_DIR/power/control"; fi   # no USB autosuspend latency
+  if [[ -n $USB_POWER_PREV ]]; then echo on >"$USB_DIR/power/control"; fi
+  BRIDGE_OWNED=1; save_state        # record intent before changing the host
   ip link add name "$BRIDGE" type bridge mcast_snooping 0
-  BRIDGE_OWNED=1; save_state
+  WIFI_OWNED=1; save_state
   nm_managed no "${NM_MANAGED_PREV:+$WIFI_IFACE}" "$BRIDGE"   # NM_MANAGED_PREV is empty unless NM knows the adapter
   fw_zone change
   ip addr add "$BRIDGE_IP/$PREFIX" brd + dev "$BRIDGE"
@@ -544,34 +772,80 @@ cmd_start() {
   quiet nft -f - <<<"$(nft_ruleset)"
 
   log "Starting access point on $WIFI_IFACE (channel $CHANNEL, $CHANNEL_WIDTH MHz)"
-  quiet hostapd -B -t -f "$LOG_FILE" -P "$STATE_DIR/hostapd.pid" "$STATE_DIR/hostapd.conf" 9>&-
-  local tries=20     # a DFS channel is radar-checked (CAC) before it goes on air: ~1 min, 10 min on weather-radar channels
-  if [[ $RADIO_CONF == *ieee80211h=1* ]]; then tries=1300; log "DFS channel: waiting for the radar check (Ctrl-C aborts)"; fi
-  retry "$tries" hostapd_enabled || die "hostapd started but the AP never reached the ENABLED state"
+  start_daemon "$STATE_DIR/hostapd.pid" hostapd -t "$STATE_DIR/hostapd.conf"
+  local wait=$AP_WAIT
+  if [[ $RADIO_CONF == *ieee80211h=1* ]]; then wait=$DFS_WAIT; log "DFS channel: waiting for the radar check (Ctrl-C aborts)"; fi
+  wait_for_ap "$wait"
 
   log "Starting DHCP ($DHCP_START - $DHCP_END)"
-  quiet dnsmasq --conf-file="$STATE_DIR/dnsmasq.conf" 9>&-
-  if (( INTERNET )); then echo 1 >/proc/sys/net/ipv4/ip_forward; fi
+  start_daemon "$STATE_DIR/dnsmasq.pid" dnsmasq --keep-in-foreground --conf-file="$STATE_DIR/dnsmasq.conf"
+  if (( INTERNET )); then set_forwarding 1; fi
+  wait_for_health
 
-  trap - EXIT
   log "Hotspot '$SSID' is up. Gateway $BRIDGE_IP, internet: $( (( INTERNET )) && echo shared || echo off )"
+  trap - EXIT ERR INT TERM
 }
 
 cmd_stop() {
   load_state
-  log "Stopping hotspot"
+  [[ -e $STATE_DIR ]] || { echo "hotspot: already stopped"; return 0; }
+  echo "==> Stopping hotspot"
   teardown
 }
 
-# health  one line per failed check (AP enabled, DHCP serving, gateway address present); silent when healthy
+# Match the listener's inode to this daemon's FDs. A different DHCP/DNS service
+# on the host must never make a broken hotspot appear healthy.
+owns_udp_port() {
+  local pid=$1 port=$2 sockets
+  sockets=$(readlink /proc/"$pid"/fd/* 2>/dev/null || true)
+  awk -v sockets="$sockets" -v port="$port" '
+    BEGIN {
+      n = split(sockets, f, "\n")
+      for (i = 1; i <= n; i++) if (f[i] ~ /^socket:\[/) {
+        gsub(/^socket:\[|\]$/, "", f[i]); owned[f[i]] = 1
+      }
+    }
+    $2 ~ (":" port "$") && owned[$10] { found = 1 }
+    END { exit !found }' "/proc/$pid/net/udp" 2>/dev/null
+}
+
+# Shared by startup and status: output is empty only when all checks pass.
 health() {
+  local pid
   hostapd_enabled || echo "access point is not ENABLED (hostapd)"
-  if daemon_pid "$STATE_DIR/dnsmasq.pid" dnsmasq >/dev/null; then
-    awk '$2 ~ /:0043$/ { f = 1 } END { exit !f }' /proc/net/udp || echo "dnsmasq is running but nothing listens on the DHCP port (udp 67)"
+  if pid=$(daemon_pid "$STATE_DIR/dnsmasq.pid" dnsmasq); then
+    owns_udp_port "$pid" 0043 || echo "hotspot dnsmasq is not listening on DHCP (udp 67)"
+    if (( INTERNET )); then owns_udp_port "$pid" 0035 || echo "hotspot dnsmasq is not listening on DNS (udp 53)"; fi
   else
     echo "dnsmasq is not running"
   fi
-  ip -4 -o addr show dev "$BRIDGE" 2>/dev/null | grep -qF " $BRIDGE_IP/" || echo "$BRIDGE no longer has $BRIDGE_IP"
+  ip -4 -o addr show dev "$BRIDGE" 2>/dev/null | grep -qF " $BRIDGE_IP/${PREFIX}" || echo "$BRIDGE no longer has $BRIDGE_IP/${PREFIX}"
+  [[ $(readlink -f "/sys/class/net/$WIFI_IFACE/master" 2>/dev/null) == "/sys/devices/virtual/net/$BRIDGE" ]] || echo "$WIFI_IFACE is not attached to $BRIDGE"
+  nft list table inet "$NFT_TABLE" >/dev/null 2>&1 || echo "hotspot firewall/NAT table is missing"
+  if (( INTERNET )); then
+    [[ $(</proc/sys/net/ipv4/ip_forward) == 1 ]] || echo "IPv4 forwarding is disabled"
+  fi
+  if [[ -n $FW_OWNED ]] && command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+    firewall-cmd --zone=trusted --query-interface="$BRIDGE" >/dev/null 2>&1 || echo "$BRIDGE is no longer in firewalld's trusted zone"
+  fi
+  return 0
+}
+
+wait_for_health() {
+  local deadline=$(( SECONDS + SERVICE_WAIT )) problems="" stable=0
+  while (( SECONDS < deadline )); do
+    problems=$(health)
+    if [[ -z $problems ]]; then
+      stable=$((stable + 1))
+      (( stable < 2 )) || return 0
+    else
+      stable=0
+    fi
+    # A dead child cannot recover; do not burn the entire timeout on it.
+    if ! alive "$(<"$STATE_DIR/hostapd.pid")" || ! alive "$(<"$STATE_DIR/dnsmasq.pid")"; then break; fi
+    sleep 0.5
+  done
+  die "hotspot failed its readiness checks: ${problems:-services did not remain ready}"
 }
 
 cmd_status() {
@@ -585,7 +859,7 @@ cmd_status() {
   problems=$(health)
   if [[ -n $problems ]]; then
     echo "hotspot: DEGRADED"
-    sed 's/^/  - /' <<<"$problems"
+    printf '  - %s\n' "${problems//$'\n'/$'\n  - '}"
     echo "  log: $LOG_FILE"
     return 1
   fi
@@ -610,11 +884,13 @@ cmd_status() {
 main() {
   local cmd=${1:-help}
   shift || true
+  case $cmd in stop|status) (( $# == 0 )) || die "$cmd does not take arguments";; esac
   case $cmd in
-    start|stop)
+    start|stop|status)
       require_root "$cmd" "$@"
-      # One start/stop at a time. The daemons are launched with 9>&- so they never inherit the lock.
-      need flock
+      # Status also takes the lock so it cannot read an in-progress transaction.
+      need flock stat
+      check_owned "$LOCK_FILE"
       exec 9>"$LOCK_FILE"
       flock -w 30 9 || die "another hotspot start/stop is still running" ;;
   esac
