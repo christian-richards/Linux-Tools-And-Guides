@@ -3,7 +3,8 @@
 # hotspot - low-latency 5 GHz Wi-Fi hotspot for VR game streaming
 #
 #   ./hotspot start <ssid> <password> [--internet=true|false] [--iface=NAME]
-#                   [--usb-id=VVVV:PPPP] [--channel=N|auto] [--width=20|40|80]
+#                   [--usb-id=VVVV:PPPP|--pci-id=VVVV:DDDD]
+#                   [--channel=N|auto] [--width=20|40|80]
 #                   [--country=XX]
 #   ./hotspot stop
 #   ./hotspot status
@@ -53,8 +54,9 @@ LEASE_TIME="12h"
 INTERNET=true                        # share the host's internet with clients (--internet=)
 
 # --- Adapter ---
-WIFI_IFACE=""                        # interface name; empty = find the adapter by USB_ID (--iface=)
+WIFI_IFACE=""                        # interface name; empty = find by PCI_ID or USB_ID (--iface=)
 USB_ID="13b1:0045"                   # Linksys WUSB6300 v2 (--usb-id=)
+PCI_ID=""                           # PCI vendor:device id; when set, overrides USB_ID (--pci-id=)
 
 # --- Radio ---
 COUNTRY_CODE=""                      # e.g. US; empty = keep the system's regulatory domain (--country=)
@@ -316,22 +318,35 @@ usb_id() {
   if [[ -n $dir ]]; then echo "$(<"$dir/idVendor"):$(<"$dir/idProduct")"; fi
 }
 
-# wifi_ifaces  one "NAME USB_ID" line per wireless interface (USB_ID empty if not USB)
+pci_id() {
+  local dir vendor device
+  dir=$(readlink -f "/sys/class/net/$1/device") || return 0
+  # Only the adapter itself may match, never a USB adapter's upstream PCI controller.
+  [[ $(readlink -f "$dir/subsystem") == /sys/bus/pci ]] || return 0
+  [[ -r $dir/vendor && -r $dir/device ]] || return 0
+  vendor=$(<"$dir/vendor"); device=$(<"$dir/device")
+  echo "${vendor#0x}:${device#0x}"
+}
+
+# wifi_ifaces  one "NAME USB_ID PCI_ID" line per wireless interface (- if unavailable)
 wifi_ifaces() {
-  local p name
+  local p name usb pci
   for p in /sys/class/net/*/phy80211; do
     name=${p%/phy80211}; name=${name##*/}
-    echo "$name $(usb_id "$name")"
+    usb=$(usb_id "$name"); pci=$(pci_id "$name")
+    echo "$name ${usb:--} ${pci:--}"
   done
 }
 
 resolve_iface() {
+  local bus=USB id=$USB_ID column=2
   if [[ -z $WIFI_IFACE ]]; then
-    WIFI_IFACE=$(wifi_ifaces | awk -v id="$USB_ID" '$2 == id && !found { print $1; found = 1 }')
-    [[ -n $WIFI_IFACE ]] || die "no wireless interface with USB id $USB_ID found (is its driver loaded?)
-Wireless interfaces present (name, USB id):
+    if [[ -n $PCI_ID ]]; then bus=PCI; id=$PCI_ID; column=3; fi
+    WIFI_IFACE=$(wifi_ifaces | awk -v id="$id" -v column="$column" '$column == id && !found { print $1; found = 1 }')
+    [[ -n $WIFI_IFACE ]] || die "no wireless interface with $bus id $id found (is its driver loaded?)
+Wireless interfaces present (name, USB id, PCI id):
 $(wifi_ifaces | sed 's/^/  /')
-Pick one with --iface=NAME or --usb-id=VVVV:PPPP"
+Pick one with --iface=NAME, --usb-id=VVVV:PPPP or --pci-id=VVVV:DDDD"
   fi
   [[ -e /sys/class/net/$WIFI_IFACE/phy80211 ]] || die "$WIFI_IFACE is not a wireless interface"
   [[ -z $(ip -4 route show default dev "$WIFI_IFACE") && -z $(ip -6 route show default dev "$WIFI_IFACE") ]] \
@@ -378,6 +393,7 @@ validate_settings() {
   INTERNET=$(to_bool "$INTERNET")
   USE_WIFI6=$(to_bool "$USE_WIFI6")
   USB_ID=${USB_ID,,}
+  PCI_ID=${PCI_ID,,}
   COUNTRY_CODE=${COUNTRY_CODE^^}
   if (( ${#SSID} < 1 || ${#SSID} > 32 )) || [[ $SSID == *[[:cntrl:]]* ]]; then die "SSID must be 1-32 bytes, no control characters"; fi
   [[ -z $PASSWORD || $PASSWORD =~ ^[[:print:]]{8,63}$ ]] || die "password must be 8-63 printable ASCII characters (or \"\" for an open network)"
@@ -390,6 +406,7 @@ validate_settings() {
   fi
   [[ -z $COUNTRY_CODE || $COUNTRY_CODE =~ ^[A-Z]{2}$ ]] || die "country must be a two-letter code"
   [[ $USB_ID =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "USB id must have the form VVVV:PPPP"
+  [[ -z $PCI_ID || $PCI_ID =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "PCI id must have the form VVVV:DDDD"
   [[ -z $WIFI_IFACE || $WIFI_IFACE =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]] || die "invalid interface name"
   [[ $BRIDGE =~ ^[a-zA-Z0-9_.-]{1,15}$ && $BRIDGE != "$WIFI_IFACE" ]] || die "invalid bridge name"
   [[ $NFT_TABLE =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || die "invalid nftables table name"
@@ -596,6 +613,7 @@ Options for start (defaults come from the top of the script):
   --internet=true|false   share the host's internet connection   [$INTERNET]
   --iface=NAME            wireless interface to use              [${WIFI_IFACE:-auto}]
   --usb-id=VVVV:PPPP      USB id used to find the interface      [$USB_ID]
+  --pci-id=VVVV:DDDD      PCI vendor:device id to find interface [${PCI_ID:-unset}]
   --channel=N|auto        5 GHz channel                          [$CHANNEL]
   --width=20|40|80        channel width in MHz                   [$CHANNEL_WIDTH]
   --country=XX            regulatory country code                [${COUNTRY_CODE:-system}]
@@ -606,14 +624,15 @@ parse_start_args() {
   local positional=()
   while (( $# )); do
     case $1 in   # turn "--opt value" into "--opt=value"
-      --internet|--iface|--usb-id|--channel|--width|--country)
+      --internet|--iface|--usb-id|--pci-id|--channel|--width|--country)
         (( $# > 1 )) || die "$1 needs a value"
         set -- "$1=$2" "${@:3}" ;;
     esac
     case $1 in
       --internet=*) INTERNET=${1#*=} ;;
       --iface=*)    WIFI_IFACE=${1#*=} ;;
-      --usb-id=*)   USB_ID=${1#*=} ;;
+      --usb-id=*)   USB_ID=${1#*=}; PCI_ID="" ;;
+      --pci-id=*)   PCI_ID=${1#*=} ;;
       --channel=*)  CHANNEL=${1#*=} ;;
       --width=*)    CHANNEL_WIDTH=${1#*=} ;;
       --country=*)  COUNTRY_CODE=${1#*=} ;;
@@ -848,8 +867,61 @@ wait_for_health() {
   die "hotspot failed its readiness checks: ${problems:-services did not remain ready}"
 }
 
+# Only current Wi-Fi stations count as connected; leases/neighbors merely add
+# details, since both can outlive a client's connection. No network probing.
+show_connected_devices() {
+  local stations
+  if ! stations=$(iw dev "$WIFI_IFACE" station dump 2>/dev/null); then
+    echo "  connected devices: unavailable (could not read stations on $WIFI_IFACE)"
+    return 0
+  fi
+  awk -v leases="$STATE_DIR/dnsmasq.leases" -v now="$(date +%s)" '
+    BEGIN {
+      while ((getline line < leases) > 0) {
+        split(line, f, " ")
+        if (f[1] !~ /^[0-9]+$/ || (f[1] != 0 && f[1] <= now)) continue
+        key = tolower(f[2])
+        ip[key] = f[3]
+        if (f[4] != "*") host[key] = f[4]
+      }
+      close(leases)
+    }
+    # Bridge neighbors also identify clients using a static IPv4 address.
+    FILENAME == ARGV[1] {
+      if ($NF == "FAILED" || $NF == "INCOMPLETE") next
+      for (i = 2; i < NF; i++) {
+        if ($i == "lladdr") {
+          key = tolower($(i + 1))
+          if (!(key in ip)) ip[key] = $1
+          break
+        }
+      }
+      next
+    }
+    function emit() {
+      if (mac == "") return
+      rows = rows sprintf("    %-17s  %-15s  %-20s  %-10s  %-22s  %s\n",
+                          mac, (ip[mac] ? ip[mac] : "-"),
+                          (host[mac] ? host[mac] : "-"), sig, tx, rx)
+      n++; mac = ""
+    }
+    /^Station /         { emit(); mac = tolower($2); sig = tx = rx = "-" }
+    $1 == "signal:"     { sig = $2 " dBm" }
+    /tx bitrate:/       { sub(/^[^:]*:[ \t]*/, ""); tx = $0 }
+    /rx bitrate:/       { sub(/^[^:]*:[ \t]*/, ""); rx = $0 }
+    END {
+      emit()
+      printf "  connected devices: %d\n", n
+      if (!n) { print "    (none)"; exit }
+      printf "    %-17s  %-15s  %-20s  %-10s  %-22s  %s\n",
+             "MAC address", "IP address", "Name", "Signal", "TX rate", "RX rate"
+      printf "%s", rows
+      print "    - = unknown; names are supplied by clients via DHCP."
+    }' <(ip -4 neigh show dev "$BRIDGE" 2>/dev/null || true) - <<<"$stations"
+}
+
 cmd_status() {
-  local net=no problems
+  local net=no problems rc=0
   load_state
   if ! daemon_pid "$STATE_DIR/hostapd.pid" hostapd >/dev/null && ! daemon_pid "$STATE_DIR/dnsmasq.pid" dnsmasq >/dev/null; then
     echo "hotspot: stopped"
@@ -861,24 +933,15 @@ cmd_status() {
     echo "hotspot: DEGRADED"
     printf '  - %s\n' "${problems//$'\n'/$'\n  - '}"
     echo "  log: $LOG_FILE"
-    return 1
+    rc=1
+  else
+    echo "hotspot: running"
   fi
   if (( INTERNET )); then net=shared; fi
-  echo "hotspot: running"
   echo "  interface: $WIFI_IFACE   bridge: $BRIDGE ($BRIDGE_IP)   internet: $net"
-  iw dev "$WIFI_IFACE" info | awk '$1 ~ /^(ssid|channel|txpower)$/ { sub(/^[ \t]+/, "  "); print }'
-  echo "  stations:"
-  iw dev "$WIFI_IFACE" station dump | awk -v leases="$STATE_DIR/dnsmasq.leases" '
-    BEGIN { while ((getline line < leases) > 0) { split(line, f, " "); ip[f[2]] = f[3]; host[f[2]] = f[4] } }
-    function emit() {
-      if (mac == "") return
-      printf "    %s  %-15s %-14s signal %s dBm  tx %s\n", mac, ip[mac], host[mac], sig, tx
-      n++; mac = ""
-    }
-    /^Station/            { emit(); mac = $2; sig = tx = "?" }
-    $1 == "signal:"       { sig = $2 }
-    /tx bitrate:/         { sub(/^[^:]*:[ \t]*/, ""); tx = $0 }
-    END                   { emit(); if (!n) print "    (none)" }'
+  iw dev "$WIFI_IFACE" info 2>/dev/null | awk '$1 ~ /^(ssid|channel|txpower)$/ { sub(/^[ \t]+/, "  "); print }' || true
+  show_connected_devices
+  return "$rc"
 }
 
 main() {
